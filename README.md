@@ -36,10 +36,11 @@ Pressing `Enter` on a focused commit opens a detail screen showing the commit me
 **Org tab** — organization-wide views (org auto-detected from `origin` remote)
 - **Activity** sub-view: recent PRs and issues grouped by author
 - **Repos** sub-view: searchable list of all non-archived org repos, sorted by most recently pushed. Press `Enter` on a repo to drill in and see top contributors, recent commits, and recent PRs for that specific repo.
+- **Users** sub-view: searchable list of org members. Press `Enter` on a user to drill in and see their recent activity across the org — commits authored, PRs submitted, and PRs they reviewed.
 
 ![gitCycle org repos sub-view](screenshots/org-repos.png)
 
-Org data is prefetched in the background on startup, so switching tabs is instant.
+Org data (activity, repos, and member list) is prefetched in the background on startup, so switching tabs is instant.
 
 ## Prerequisites
 
@@ -113,7 +114,7 @@ gitcycle
 **Org tab**
 | Key | Action |
 | --- | --- |
-| `[` / `]` | switch sub-view (Activity ↔ Repos) |
+| `[` / `]` | cycle sub-view (Activity ↔ Repos ↔ Users) |
 | `↑`/`↓`, `j`/`k`, `PgUp`/`PgDn`, `g`/`G` | scroll / move selection |
 
 **Org → Repos sub-view**
@@ -123,6 +124,14 @@ gitcycle
 | `Enter` (in filter mode) | confirm filter |
 | `Esc` (in filter mode) | clear filter |
 | `Enter` (on a repo) | open repo detail |
+
+**Org → Users sub-view**
+| Key | Action |
+| --- | --- |
+| `/` | start typing to filter the user list |
+| `Enter` (in filter mode) | confirm filter |
+| `Esc` (in filter mode) | clear filter |
+| `Enter` (on a user) | open user detail (commits, submitted PRs, reviewed PRs) |
 
 ## Troubleshooting
 
