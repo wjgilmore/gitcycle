@@ -2,6 +2,8 @@
 
 A terminal UI for exploring the git repository you're standing in and the GitHub organization it belongs to. Built with [Ratatui](https://ratatui.rs/), shells out to `git` and `gh` for data.
 
+![github-tui repo tab](screenshots/repo-tab.png)
+
 ## Features
 
 **Repo tab** — current repository overview
@@ -12,6 +14,8 @@ A terminal UI for exploring the git repository you're standing in and the GitHub
 **Org tab** — organization-wide views (org auto-detected from `origin` remote)
 - **Activity** sub-view: recent PRs and issues grouped by author
 - **Repos** sub-view: searchable list of all non-archived org repos, sorted by most recently pushed. Press `Enter` on a repo to drill in and see top contributors, recent commits, and recent PRs for that specific repo.
+
+![github-tui org repos sub-view](screenshots/org-repos.png)
 
 Org data is prefetched in the background on startup, so switching tabs is instant.
 
@@ -52,10 +56,10 @@ If `~/.cargo/bin` isn't on your `PATH`, add it to your shell config:
 export PATH="$HOME/.cargo/bin:$PATH"
 ```
 
-Then open a new terminal (or `source` your config) and verify:
+Then open a new terminal (or `source` your config) and verify the binary is on your PATH:
 
 ```sh
-github-tui --help 2>/dev/null || which github-tui
+which github-tui
 ```
 
 ## Usage
