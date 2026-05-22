@@ -1,8 +1,8 @@
 [package]
-name = "github-tui"
+name = "gitcycle"
 version = "0.1.0"
 edition = "2024"
-authors = ["Jason Gilmore <jason.gilmore@adalo.com>"]
+authors = ["Jason Gilmore <wj@wjgilmore.com>"]
 license = "MIT"
 description = "Terminal UI for exploring the current git repository and its GitHub organization."
 readme = "README.md"

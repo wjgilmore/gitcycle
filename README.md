@@ -20,8 +20,6 @@ a8"    `Y88 88   88    88          `8b     d8' a8"     "" 88 a8P_____88
 
 A terminal UI for exploring the git repository you're standing in and the GitHub organization it belongs to. Built with [Ratatui](https://ratatui.rs/), shells out to `git` and `gh` for data.
 
-> The CLI binary installed by this project is named `github-tui` (defined in `Cargo.toml`). All commands below refer to that binary.
-
 ![gitCycle repo tab](screenshots/repo-tab.png)
 
 ## Features
@@ -71,7 +69,7 @@ From the repository root:
 cargo install --path .
 ```
 
-This builds in release mode and installs the binary to `~/.cargo/bin/github-tui`.
+This builds in release mode and installs the binary to `~/.cargo/bin/gitcycle`.
 
 If `~/.cargo/bin` isn't on your `PATH`, add it to your shell config:
 
@@ -83,7 +81,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 Then open a new terminal (or `source` your config) and verify the binary is on your PATH:
 
 ```sh
-which github-tui
+which gitcycle
 ```
 
 ## Usage
@@ -91,7 +89,7 @@ which github-tui
 `cd` into any git repository whose `origin` remote points to GitHub, then run:
 
 ```sh
-github-tui
+gitcycle
 ```
 
 ### Keyboard shortcuts
