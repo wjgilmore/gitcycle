@@ -1,8 +1,25 @@
-# github-tui
+```
+═══════════════════════════════════════════════════════════════════════
+░▒▓ ──────────────────────────────────────────────────────────►    ▓▒░
+
+  ██████╗ ██╗████████╗ ██████╗██╗   ██╗ ██████╗██╗     ███████╗
+ ██╔════╝ ██║╚══██╔══╝██╔════╝╚██╗ ██╔╝██╔════╝██║     ██╔════╝
+ ██║  ███╗██║   ██║   ██║      ╚████╔╝ ██║     ██║     █████╗
+ ██║   ██║██║   ██║   ██║       ╚██╔╝  ██║     ██║     ██╔══╝
+ ╚██████╔╝██║   ██║   ╚██████╗   ██║   ╚██████╗███████╗███████╗
+  ╚═════╝ ╚═╝   ╚═╝    ╚═════╝   ╚═╝    ╚═════╝╚══════╝╚══════╝
+
+░▒▓ ◄──────────────  end of line · ride the grid  ──────────────  ▓▒░
+═══════════════════════════════════════════════════════════════════════
+```
+
+# gitCycle
 
 A terminal UI for exploring the git repository you're standing in and the GitHub organization it belongs to. Built with [Ratatui](https://ratatui.rs/), shells out to `git` and `gh` for data.
 
-![github-tui repo tab](screenshots/repo-tab.png)
+> The CLI binary installed by this project is named `github-tui` (defined in `Cargo.toml`). All commands below refer to that binary.
+
+![gitCycle repo tab](screenshots/repo-tab.png)
 
 ## Features
 
@@ -13,13 +30,13 @@ A terminal UI for exploring the git repository you're standing in and the GitHub
 
 Pressing `Enter` on a focused commit opens a detail screen showing the commit metadata, full message, and per-file change stats:
 
-![github-tui commit detail](screenshots/commit-detail.png)
+![gitCycle commit detail](screenshots/commit-detail.png)
 
 **Org tab** — organization-wide views (org auto-detected from `origin` remote)
 - **Activity** sub-view: recent PRs and issues grouped by author
 - **Repos** sub-view: searchable list of all non-archived org repos, sorted by most recently pushed. Press `Enter` on a repo to drill in and see top contributors, recent commits, and recent PRs for that specific repo.
 
-![github-tui org repos sub-view](screenshots/org-repos.png)
+![gitCycle org repos sub-view](screenshots/org-repos.png)
 
 Org data is prefetched in the background on startup, so switching tabs is instant.
 
