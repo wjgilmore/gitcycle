@@ -588,6 +588,219 @@ pub fn commit_detail(sha: &str) -> Result<CommitDetail> {
     })
 }
 
+#[derive(Debug, Clone)]
+pub struct DirtyFile {
+    pub status: String,
+    pub path: String,
+}
+
+pub fn dirty_file_list() -> Result<Vec<DirtyFile>> {
+    let out = run_git(&["status", "--porcelain"])?;
+    let files = out
+        .lines()
+        .filter(|l| l.len() >= 3)
+        .map(|l| {
+            let status = l[..2].to_string();
+            let path = l[3..].to_string();
+            DirtyFile { status, path }
+        })
+        .collect();
+    Ok(files)
+}
+
+#[derive(Debug, Clone)]
+pub struct ReviewRequestedPr {
+    pub number: u64,
+    pub title: String,
+    pub repo: String,
+    pub author: String,
+    pub updated_at: String,
+    pub is_draft: bool,
+}
+
+pub fn review_requested_prs(org: &str, limit: usize) -> Result<Vec<ReviewRequestedPr>> {
+    let stdout = run_gh(&[
+        "search",
+        "prs",
+        "--owner",
+        org,
+        "--review-requested",
+        "@me",
+        "--state",
+        "open",
+        "--sort",
+        "updated",
+        "--limit",
+        &limit.to_string(),
+        "--json",
+        "number,title,author,repository,state,isDraft,updatedAt",
+    ])
+    .context("gh search review-requested PRs failed")?;
+    let raw: Vec<SearchPr> =
+        serde_json::from_slice(&stdout).context("failed to parse review-requested PR JSON")?;
+    Ok(raw
+        .into_iter()
+        .map(|p| ReviewRequestedPr {
+            number: p.number,
+            title: p.title,
+            repo: p.repository.name_with_owner,
+            author: p.author.map(|a| a.login).unwrap_or_default(),
+            is_draft: p.is_draft,
+            updated_at: humanize_iso(&p.updated_at),
+        })
+        .collect())
+}
+
+pub fn authed_user_login() -> Result<String> {
+    let stdout = run_gh(&["api", "user", "--jq", ".login"]).context("gh api user failed")?;
+    let login = String::from_utf8_lossy(&stdout).trim().to_string();
+    if login.is_empty() {
+        bail!("gh api user returned empty login");
+    }
+    Ok(login)
+}
+
+#[derive(Debug, Deserialize)]
+struct RawUserOrg {
+    login: String,
+}
+
+pub fn resolve_dashboard_org(cwd_org: Option<&str>) -> Result<String> {
+    if let Some(o) = cwd_org {
+        if !o.is_empty() {
+            return Ok(o.to_string());
+        }
+    }
+    let stdout = run_gh(&["api", "/user/orgs"]).context("gh api /user/orgs failed")?;
+    let raw: Vec<RawUserOrg> =
+        serde_json::from_slice(&stdout).context("failed to parse /user/orgs JSON")?;
+    raw.into_iter()
+        .next()
+        .map(|o| o.login)
+        .ok_or_else(|| anyhow::anyhow!("user belongs to no orgs"))
+}
+
+pub fn is_git_repo() -> bool {
+    run_git(&["rev-parse", "--is-inside-work-tree"]).is_ok()
+}
+
+pub fn dashboard_open_prs(limit: usize) -> Result<Vec<UserPr>> {
+    let stdout = run_gh(&[
+        "search",
+        "prs",
+        "--author",
+        "@me",
+        "--state",
+        "open",
+        "--sort",
+        "updated",
+        "--limit",
+        &limit.to_string(),
+        "--json",
+        "number,title,author,repository,state,isDraft,updatedAt",
+    ])
+    .context("gh search my open PRs failed")?;
+    let raw: Vec<SearchPr> =
+        serde_json::from_slice(&stdout).context("failed to parse my open PR JSON")?;
+    Ok(raw
+        .into_iter()
+        .map(|p| UserPr {
+            number: p.number,
+            title: p.title,
+            repo: p.repository.name_with_owner,
+            state: p.state,
+            is_draft: p.is_draft,
+            author: p.author.map(|a| a.login).unwrap_or_default(),
+            updated_at: humanize_iso(&p.updated_at),
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone)]
+pub struct Notification {
+    pub reason: String,
+    pub title: String,
+    pub repo: String,
+    pub kind: String,
+    pub unread: bool,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawNotification {
+    reason: String,
+    unread: bool,
+    updated_at: String,
+    subject: RawNotificationSubject,
+    repository: RawNotificationRepo,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawNotificationSubject {
+    title: String,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawNotificationRepo {
+    full_name: String,
+}
+
+pub fn notifications(limit: usize) -> Result<Vec<Notification>> {
+    let stdout = run_gh(&[
+        "api",
+        &format!("/notifications?per_page={}", limit.min(50)),
+    ])
+    .context("gh api /notifications failed")?;
+    let raw: Vec<RawNotification> =
+        serde_json::from_slice(&stdout).context("failed to parse notifications JSON")?;
+    Ok(raw
+        .into_iter()
+        .map(|n| Notification {
+            reason: n.reason,
+            title: n.subject.title,
+            repo: n.repository.full_name,
+            kind: n.subject.kind,
+            unread: n.unread,
+            updated_at: humanize_iso(&n.updated_at),
+        })
+        .collect())
+}
+
+pub fn my_recent_commits(login: &str, limit: usize) -> Result<Vec<UserCommit>> {
+    let stdout = run_gh(&[
+        "search",
+        "commits",
+        "--author",
+        login,
+        "--sort",
+        "author-date",
+        "--order",
+        "desc",
+        "--limit",
+        &limit.to_string(),
+        "--json",
+        "sha,commit,repository",
+    ])
+    .context("gh search my commits failed")?;
+    let raw: Vec<RawSearchCommit> =
+        serde_json::from_slice(&stdout).context("failed to parse my commits JSON")?;
+    Ok(raw
+        .into_iter()
+        .map(|c| {
+            let subject = c.commit.message.lines().next().unwrap_or("").to_string();
+            let short_sha: String = c.sha.chars().take(7).collect();
+            UserCommit {
+                sha: short_sha,
+                repo: c.repository.full_name,
+                subject,
+                date: humanize_iso(&c.commit.author.date),
+            }
+        })
+        .collect())
+}
+
 pub fn split_full_name(full: &str) -> Option<(String, String)> {
     let mut parts = full.splitn(2, '/');
     let owner = parts.next()?.to_string();

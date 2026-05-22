@@ -24,10 +24,21 @@ A terminal UI for exploring the git repository you're standing in and the GitHub
 
 ## Features
 
-**Repo tab** — current repository overview
-- Branch, upstream, ahead/behind, dirty file count, last fetch
+**Dashboard tab** — your GitHub at a glance (works regardless of cwd; no git repo required)
+- **Awaiting your review** — PRs in your active org where you're a requested reviewer
+- **Your open PRs** — PRs you've authored across all orgs you have access to
+- **Notifications** — your GitHub inbox (`gh api /notifications`), with unread indicators and reason tags (review_requested / mention / assign / ci_activity / …)
+- **Your recent commits** — commits authored by you across all repos, newest first
+
+The Dashboard scopes "awaiting your review" to the org detected from your current repo. If you're not in a repo, it falls back to your primary GitHub org from `gh api /user/orgs`.
+
+**Repo tab** — current repository overview (only meaningful inside a git repo)
+- Branch, upstream, ahead/behind, last fetch
+- Dirty files list — each modified/added/deleted/untracked path with a color-coded status code (`M`/`A`/`D`/`??`/`R`)
 - Recent commits (focus with `c`, press `Enter` for a full commit detail: author, message, file-by-file stats)
-- Open pull requests
+- Open pull requests in the current repo
+
+When `gitcycle` is launched outside a git repo, this tab shows a friendly placeholder.
 
 Pressing `Enter` on a focused commit opens a detail screen showing the commit metadata, full message, and per-file change stats:
 
@@ -100,7 +111,7 @@ gitcycle
 | --- | --- |
 | `q` | quit |
 | `r` | reload all data |
-| `1` / `2` | jump to Repo / Org tab |
+| `1` / `2` / `3` | jump to Dashboard / Repo / Org tab |
 | `Tab`, `←`/`→` | cycle tabs |
 | `Esc` | back / close detail / unfocus panel |
 

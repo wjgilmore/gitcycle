@@ -22,12 +22,13 @@ use std::{
 };
 
 use data::{
-    Commit, CommitDetail, Contributor, OrgMember, PullRequest, RepoInfo, RepoSummary, UserActivity,
-    UserCommit, UserPr,
+    Commit, CommitDetail, Contributor, DirtyFile, Notification, OrgMember, PullRequest, RepoInfo,
+    RepoSummary, ReviewRequestedPr, UserActivity, UserCommit, UserPr,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
+    Dashboard,
     Repo,
     Org,
     RepoDetail,
@@ -121,6 +122,10 @@ struct RepoDetailState {
 
 struct App {
     screen: Screen,
+    in_git_repo: bool,
+    dashboard_org: Option<String>,
+    dashboard_org_err: Option<String>,
+    authed_user: Option<String>,
     summary: Option<RepoSummary>,
     summary_err: Option<String>,
     commits: Vec<Commit>,
@@ -130,11 +135,48 @@ struct App {
     commit_detail: Option<CommitDetailView>,
     prs: Vec<PullRequest>,
     prs_err: Option<String>,
+    dirty_files: Vec<DirtyFile>,
+    dirty_files_err: Option<String>,
+    dashboard: DashboardState,
     org: OrgState,
     org_scroll: u16,
     repo_detail: Option<RepoDetailState>,
     user_detail: Option<UserDetailState>,
     bg_rx: Option<Receiver<BgMessage>>,
+}
+
+struct DashboardState {
+    review_prs: Vec<ReviewRequestedPr>,
+    review_prs_err: Option<String>,
+    review_prs_loaded: bool,
+    my_prs: Vec<UserPr>,
+    my_prs_err: Option<String>,
+    my_prs_loaded: bool,
+    notifications: Vec<Notification>,
+    notifications_err: Option<String>,
+    notifications_loaded: bool,
+    my_commits: Vec<UserCommit>,
+    my_commits_err: Option<String>,
+    my_commits_loaded: bool,
+}
+
+impl DashboardState {
+    fn new() -> Self {
+        Self {
+            review_prs: Vec::new(),
+            review_prs_err: None,
+            review_prs_loaded: false,
+            my_prs: Vec::new(),
+            my_prs_err: None,
+            my_prs_loaded: false,
+            notifications: Vec::new(),
+            notifications_err: None,
+            notifications_loaded: false,
+            my_commits: Vec::new(),
+            my_commits_err: None,
+            my_commits_loaded: false,
+        }
+    }
 }
 
 struct CommitDetailView {
@@ -147,57 +189,145 @@ enum BgMessage {
     Activity(Result<Vec<UserActivity>, String>),
     Repos(Result<Vec<RepoInfo>, String>),
     Members(Result<Vec<OrgMember>, String>),
+    Review(Result<Vec<ReviewRequestedPr>, String>),
+    MyPrs(Result<Vec<UserPr>, String>),
+    Notifications(Result<Vec<Notification>, String>),
+    MyCommits(Result<Vec<UserCommit>, String>),
 }
 
-fn spawn_org_prefetch(org: String) -> Receiver<BgMessage> {
+fn spawn_bg_prefetches(
+    org: Option<String>,
+    dashboard_org: Option<String>,
+    authed_user: Option<String>,
+) -> Receiver<BgMessage> {
     let (tx, rx) = mpsc::channel();
 
-    let tx_act = tx.clone();
-    let org_act = org.clone();
+    // Org-scoped (only if cwd org is known)
+    if let Some(o) = org.clone() {
+        let tx_act = tx.clone();
+        let oa = o.clone();
+        thread::spawn(move || {
+            let result = data::org_activity(&oa, 8).map_err(|e| format!("{:#}", e));
+            let _ = tx_act.send(BgMessage::Activity(result));
+        });
+
+        let tx_repos = tx.clone();
+        let or = o.clone();
+        thread::spawn(move || {
+            let result = data::org_repos(&or).map_err(|e| format!("{:#}", e));
+            let _ = tx_repos.send(BgMessage::Repos(result));
+        });
+
+        let tx_mem = tx.clone();
+        thread::spawn(move || {
+            let result = data::org_members(&o).map_err(|e| format!("{:#}", e));
+            let _ = tx_mem.send(BgMessage::Members(result));
+        });
+    }
+
+    // Dashboard: awaiting-review is org-scoped (use dashboard_org if available)
+    if let Some(d_org) = dashboard_org {
+        let tx_rev = tx.clone();
+        thread::spawn(move || {
+            let result =
+                data::review_requested_prs(&d_org, 15).map_err(|e| format!("{:#}", e));
+            let _ = tx_rev.send(BgMessage::Review(result));
+        });
+    }
+
+    // Dashboard: my open PRs (global)
+    let tx_mp = tx.clone();
     thread::spawn(move || {
-        let result = data::org_activity(&org_act, 8).map_err(|e| format!("{:#}", e));
-        let _ = tx_act.send(BgMessage::Activity(result));
+        let result = data::dashboard_open_prs(15).map_err(|e| format!("{:#}", e));
+        let _ = tx_mp.send(BgMessage::MyPrs(result));
     });
 
-    let tx_repos = tx.clone();
-    let org_repos = org.clone();
+    // Dashboard: notifications (global)
+    let tx_no = tx.clone();
     thread::spawn(move || {
-        let result = data::org_repos(&org_repos).map_err(|e| format!("{:#}", e));
-        let _ = tx_repos.send(BgMessage::Repos(result));
+        let result = data::notifications(20).map_err(|e| format!("{:#}", e));
+        let _ = tx_no.send(BgMessage::Notifications(result));
     });
 
-    thread::spawn(move || {
-        let result = data::org_members(&org).map_err(|e| format!("{:#}", e));
-        let _ = tx.send(BgMessage::Members(result));
-    });
+    // Dashboard: my recent commits (needs authed user login)
+    if let Some(login) = authed_user {
+        thread::spawn(move || {
+            let result = data::my_recent_commits(&login, 15).map_err(|e| format!("{:#}", e));
+            let _ = tx.send(BgMessage::MyCommits(result));
+        });
+    }
 
     rx
 }
 
 impl App {
     fn load_repo() -> Self {
-        let (summary, summary_err) = match data::repo_summary() {
-            Ok(s) => (Some(s), None),
-            Err(e) => (None, Some(format!("{:#}", e))),
-        };
-        let (commits, commits_err) = match data::recent_commits(15) {
-            Ok(c) => (c, None),
-            Err(e) => (vec![], Some(format!("{:#}", e))),
-        };
-        let (prs, prs_err) = match data::open_pull_requests(10) {
-            Ok(p) => (p, None),
-            Err(e) => (vec![], Some(format!("{:#}", e))),
+        let in_git_repo = data::is_git_repo();
+
+        let (summary, summary_err, commits, commits_err, prs, prs_err, dirty_files, dirty_files_err) =
+            if in_git_repo {
+                let (summary, summary_err) = match data::repo_summary() {
+                    Ok(s) => (Some(s), None),
+                    Err(e) => (None, Some(format!("{:#}", e))),
+                };
+                let (commits, commits_err) = match data::recent_commits(15) {
+                    Ok(c) => (c, None),
+                    Err(e) => (vec![], Some(format!("{:#}", e))),
+                };
+                let (prs, prs_err) = match data::open_pull_requests(10) {
+                    Ok(p) => (p, None),
+                    Err(e) => (vec![], Some(format!("{:#}", e))),
+                };
+                let (dirty_files, dirty_files_err) = match data::dirty_file_list() {
+                    Ok(d) => (d, None),
+                    Err(e) => (vec![], Some(format!("{:#}", e))),
+                };
+                (
+                    summary,
+                    summary_err,
+                    commits,
+                    commits_err,
+                    prs,
+                    prs_err,
+                    dirty_files,
+                    dirty_files_err,
+                )
+            } else {
+                (None, None, vec![], None, vec![], None, vec![], None)
+            };
+
+        let (name, detect_err) = if in_git_repo {
+            match data::detect_org() {
+                Ok(o) => (Some(o), None),
+                Err(e) => (None, Some(format!("{:#}", e))),
+            }
+        } else {
+            (None, None)
         };
 
-        let (name, detect_err) = match data::detect_org() {
-            Ok(o) => (Some(o), None),
+        let (dashboard_org, dashboard_org_err) =
+            match data::resolve_dashboard_org(name.as_deref()) {
+                Ok(o) => (Some(o), None),
+                Err(e) => (None, Some(format!("{:#}", e))),
+            };
+
+        let (authed_user, _authed_err) = match data::authed_user_login() {
+            Ok(u) => (Some(u), None),
             Err(e) => (None, Some(format!("{:#}", e))),
         };
 
-        let bg_rx = name.as_ref().map(|n| spawn_org_prefetch(n.clone()));
+        let bg_rx = Some(spawn_bg_prefetches(
+            name.clone(),
+            dashboard_org.clone(),
+            authed_user.clone(),
+        ));
 
         App {
-            screen: Screen::Repo,
+            screen: Screen::Dashboard,
+            in_git_repo,
+            dashboard_org,
+            dashboard_org_err,
+            authed_user,
             summary,
             summary_err,
             commits,
@@ -207,6 +337,9 @@ impl App {
             commit_detail: None,
             prs,
             prs_err,
+            dirty_files,
+            dirty_files_err,
+            dashboard: DashboardState::new(),
             org: OrgState {
                 name,
                 detect_err,
@@ -266,6 +399,42 @@ impl App {
                 Ok(BgMessage::Members(Err(e))) => {
                     self.org.users.loaded = true;
                     self.org.users.error = Some(e);
+                }
+                Ok(BgMessage::Review(Ok(p))) => {
+                    self.dashboard.review_prs = p;
+                    self.dashboard.review_prs_loaded = true;
+                    self.dashboard.review_prs_err = None;
+                }
+                Ok(BgMessage::Review(Err(e))) => {
+                    self.dashboard.review_prs_loaded = true;
+                    self.dashboard.review_prs_err = Some(e);
+                }
+                Ok(BgMessage::MyPrs(Ok(p))) => {
+                    self.dashboard.my_prs = p;
+                    self.dashboard.my_prs_loaded = true;
+                    self.dashboard.my_prs_err = None;
+                }
+                Ok(BgMessage::MyPrs(Err(e))) => {
+                    self.dashboard.my_prs_loaded = true;
+                    self.dashboard.my_prs_err = Some(e);
+                }
+                Ok(BgMessage::Notifications(Ok(n))) => {
+                    self.dashboard.notifications = n;
+                    self.dashboard.notifications_loaded = true;
+                    self.dashboard.notifications_err = None;
+                }
+                Ok(BgMessage::Notifications(Err(e))) => {
+                    self.dashboard.notifications_loaded = true;
+                    self.dashboard.notifications_err = Some(e);
+                }
+                Ok(BgMessage::MyCommits(Ok(c))) => {
+                    self.dashboard.my_commits = c;
+                    self.dashboard.my_commits_loaded = true;
+                    self.dashboard.my_commits_err = None;
+                }
+                Ok(BgMessage::MyCommits(Err(e))) => {
+                    self.dashboard.my_commits_loaded = true;
+                    self.dashboard.my_commits_err = Some(e);
                 }
                 Err(_) => break,
             }
@@ -344,7 +513,7 @@ impl App {
         self.screen = screen;
         self.org.subview = prev_subview;
         match screen {
-            Screen::Repo | Screen::Org => {}
+            Screen::Dashboard | Screen::Repo | Screen::Org => {}
             Screen::RepoDetail => {
                 if let Some(full) = prev_repo_name {
                     self.open_repo_detail(full);
@@ -662,9 +831,16 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.repo_detail = None;
                         app.commit_detail = None;
                         app.user_detail = None;
-                        app.screen = Screen::Repo;
+                        app.commits_focused = false;
+                        app.screen = Screen::Dashboard;
                     }
                     KeyCode::Char('2') => {
+                        app.repo_detail = None;
+                        app.commit_detail = None;
+                        app.user_detail = None;
+                        app.screen = Screen::Repo;
+                    }
+                    KeyCode::Char('3') => {
                         app.repo_detail = None;
                         app.commit_detail = None;
                         app.user_detail = None;
@@ -677,11 +853,12 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.user_detail = None;
                         app.commits_focused = false;
                         app.screen = match app.screen {
+                            Screen::Dashboard => Screen::Repo,
                             Screen::Repo => Screen::Org,
-                            Screen::Org => Screen::Repo,
+                            Screen::Org => Screen::Dashboard,
                             Screen::RepoDetail
                             | Screen::CommitDetail
-                            | Screen::UserDetail => Screen::Repo,
+                            | Screen::UserDetail => Screen::Dashboard,
                         };
                     }
                     KeyCode::BackTab | KeyCode::Left => {
@@ -690,11 +867,12 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.user_detail = None;
                         app.commits_focused = false;
                         app.screen = match app.screen {
-                            Screen::Repo => Screen::Org,
+                            Screen::Dashboard => Screen::Org,
+                            Screen::Repo => Screen::Dashboard,
                             Screen::Org => Screen::Repo,
                             Screen::RepoDetail
                             | Screen::CommitDetail
-                            | Screen::UserDetail => Screen::Repo,
+                            | Screen::UserDetail => Screen::Dashboard,
                         };
                     }
                     KeyCode::Char(']') if app.screen == Screen::Org => {
@@ -833,6 +1011,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
 
     render_tabs(f, outer[0], app);
     match app.screen {
+        Screen::Dashboard => render_dashboard_screen(f, outer[1], app),
         Screen::Repo => render_repo_screen(f, outer[1], app),
         Screen::Org => render_org_screen(f, outer[1], app),
         Screen::RepoDetail => render_repo_detail_screen(f, outer[1], app),
@@ -843,14 +1022,23 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
 }
 
 fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let org_label = match &app.org.name {
-        Some(n) => format!("2 Org ({})", n),
-        None => "2 Org".to_string(),
+    let dash_label = match &app.authed_user {
+        Some(u) => format!("1 Dashboard (@{})", u),
+        None => "1 Dashboard".to_string(),
     };
-    let titles = vec![Line::from("1 Repo"), Line::from(org_label)];
+    let org_label = match &app.org.name {
+        Some(n) => format!("3 Org ({})", n),
+        None => "3 Org".to_string(),
+    };
+    let titles = vec![
+        Line::from(dash_label),
+        Line::from("2 Repo"),
+        Line::from(org_label),
+    ];
     let select = match app.screen {
-        Screen::Repo | Screen::CommitDetail => 0,
-        Screen::Org | Screen::RepoDetail | Screen::UserDetail => 1,
+        Screen::Dashboard => 0,
+        Screen::Repo | Screen::CommitDetail => 1,
+        Screen::Org | Screen::RepoDetail | Screen::UserDetail => 2,
     };
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title(" gitcycle "))
@@ -865,19 +1053,363 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_repo_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    if !app.in_git_repo {
+        let block = Block::default().borders(Borders::ALL).title(" repo ");
+        f.render_widget(
+            Paragraph::new("current directory is not a git repository\n\nrun gitcycle from inside a git repo to use this tab")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
     let cols = Layout::default()
         .direction(Direction::Horizontal)
         .constraints([Constraint::Percentage(40), Constraint::Percentage(60)])
         .split(area);
+
+    let left = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(8), Constraint::Min(0)])
+        .split(cols[0]);
 
     let right = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
         .split(cols[1]);
 
-    render_summary(f, cols[0], app);
+    render_summary(f, left[0], app);
+    render_dirty_files(f, left[1], app);
     render_commits(f, right[0], app);
     render_prs(f, right[1], app);
+}
+
+fn render_dashboard_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(area);
+
+    let top = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[0]);
+    let bottom = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .split(rows[1]);
+
+    render_dashboard_review(f, top[0], app);
+    render_dashboard_my_prs(f, top[1], app);
+    render_dashboard_notifications(f, bottom[0], app);
+    render_dashboard_my_commits(f, bottom[1], app);
+}
+
+fn render_dashboard_review(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let title = match &app.dashboard_org {
+        Some(o) => format!(" awaiting your review — {} ", o),
+        None => " awaiting your review ".to_string(),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    if let Some(err) = &app.dashboard_org_err {
+        f.render_widget(
+            Paragraph::new(format!("(no org to scope to: {})", err))
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if !app.dashboard.review_prs_loaded {
+        f.render_widget(
+            Paragraph::new("loading…")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    if let Some(err) = &app.dashboard.review_prs_err {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if app.dashboard.review_prs.is_empty() {
+        f.render_widget(
+            Paragraph::new("no PRs need your review")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = app
+        .dashboard
+        .review_prs
+        .iter()
+        .map(|p| {
+            let draft = if p.is_draft {
+                Span::styled(" [draft]", Style::default().fg(Color::DarkGray))
+            } else {
+                Span::raw("")
+            };
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("#{:<5}", p.number), Style::default().fg(Color::Green)),
+                Span::styled(
+                    format!("{:<24} ", truncate(&p.repo, 24)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(p.title.clone()),
+                draft,
+                Span::styled(
+                    format!("  @{} ({})", p.author, p.updated_at),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn render_dashboard_my_prs(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL).title(" your open PRs ");
+    if !app.dashboard.my_prs_loaded {
+        f.render_widget(
+            Paragraph::new("loading…")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    if let Some(err) = &app.dashboard.my_prs_err {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if app.dashboard.my_prs.is_empty() {
+        f.render_widget(
+            Paragraph::new("no open PRs of yours")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = app
+        .dashboard
+        .my_prs
+        .iter()
+        .map(|p| {
+            let (label, color) = pr_state_style(&p.state, p.is_draft);
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("#{:<5}", p.number), Style::default().fg(Color::Green)),
+                Span::styled(format!("{:<7}", label), Style::default().fg(color)),
+                Span::styled(
+                    format!("{:<24}", truncate(&p.repo, 24)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(" "),
+                Span::raw(p.title.clone()),
+                Span::styled(
+                    format!("  ({})", p.updated_at),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn render_dashboard_notifications(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL).title(" notifications ");
+    if !app.dashboard.notifications_loaded {
+        f.render_widget(
+            Paragraph::new("loading…")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    if let Some(err) = &app.dashboard.notifications_err {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if app.dashboard.notifications.is_empty() {
+        f.render_widget(
+            Paragraph::new("inbox zero")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = app
+        .dashboard
+        .notifications
+        .iter()
+        .map(|n| {
+            let reason_color = match n.reason.as_str() {
+                "review_requested" => Color::Yellow,
+                "mention" | "team_mention" => Color::Magenta,
+                "assign" => Color::Cyan,
+                "ci_activity" => Color::Red,
+                _ => Color::DarkGray,
+            };
+            let unread_marker = if n.unread {
+                Span::styled("● ", Style::default().fg(Color::Yellow))
+            } else {
+                Span::raw("  ")
+            };
+            ListItem::new(Line::from(vec![
+                unread_marker,
+                Span::styled(
+                    format!("{:<18}", truncate(&n.reason, 18)),
+                    Style::default().fg(reason_color),
+                ),
+                Span::styled(
+                    format!("{:<22} ", truncate(&n.repo, 22)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(n.title.clone()),
+                Span::styled(
+                    format!("  ({})", n.updated_at),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn render_dashboard_my_commits(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" your recent commits ");
+    if !app.dashboard.my_commits_loaded {
+        f.render_widget(
+            Paragraph::new("loading…")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    if let Some(err) = &app.dashboard.my_commits_err {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if app.dashboard.my_commits.is_empty() {
+        f.render_widget(
+            Paragraph::new("no recent commits")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = app
+        .dashboard
+        .my_commits
+        .iter()
+        .map(|c| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} ", c.sha), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{:<24}", truncate(&c.repo, 24)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(" "),
+                Span::raw(c.subject.clone()),
+                Span::styled(
+                    format!("  ({})", c.date),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn render_dirty_files(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let block = Block::default().borders(Borders::ALL).title(" dirty files ");
+    if let Some(err) = &app.dirty_files_err {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if app.dirty_files.is_empty() {
+        f.render_widget(
+            Paragraph::new("clean working tree")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = app
+        .dirty_files
+        .iter()
+        .map(|d| {
+            ListItem::new(Line::from(vec![
+                Span::styled(
+                    format!("{} ", d.status),
+                    Style::default().fg(status_color(&d.status)),
+                ),
+                Span::raw(d.path.clone()),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn status_color(s: &str) -> Color {
+    let t = s.trim();
+    if t == "??" {
+        Color::Magenta
+    } else if t.contains('A') {
+        Color::Green
+    } else if t.contains('D') {
+        Color::Red
+    } else if t.contains('M') {
+        Color::Yellow
+    } else if t.contains('R') {
+        Color::Cyan
+    } else {
+        Color::Gray
+    }
 }
 
 fn render_summary(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -888,14 +1420,12 @@ fn render_summary(f: &mut ratatui::Frame, area: Rect, app: &App) {
             let remote = s.remote_url.as_deref().unwrap_or("(none)");
             let fetch = s.last_fetch.as_deref().unwrap_or("(unknown)");
             let ahead_behind = format!("{} / {}", s.ahead, s.behind);
-            let dirty = s.dirty_files.to_string();
             vec![
                 kv("root", &s.root),
                 kv("branch", &s.branch),
                 kv("upstream", upstream),
                 kv("remote", remote),
                 kv("ahead/behind", &ahead_behind),
-                kv("dirty files", &dirty),
                 kv("last fetch", fetch),
             ]
         }
@@ -1882,6 +2412,7 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
     ];
 
     match app.screen {
+        Screen::Dashboard => {}
         Screen::Repo => {
             if app.commits_focused {
                 spans.extend([
