@@ -1,6 +1,20 @@
-<div align="center">
-  <img src="screenshots/logo.svg" alt="gitCycle" />
-</div>
+```
+░▒▓ ─────────────────────────────────────────────────────────────── ►  ▓▒░
+
+            88           ,ad8888ba,                       88
+            ""   ,d     d8"'    `"8b                      88
+                 88    d8'                                88
+ ,adPPYb,d8 88 MM88MMM 88          8b       d8  ,adPPYba, 88  ,adPPYba,
+a8"    `Y88 88   88    88          `8b     d8' a8"     "" 88 a8P_____88
+8b       88 88   88    Y8,          `8b   d8'  8b         88 8PP"""""""
+"8a,   ,d88 88   88,    Y8a.    .a8P `8b,d8'   "8a,   ,aa 88 "8b,   ,aa
+ `"YbbdP"Y8 88   "Y888   `"Y8888Y"'    Y88'     `"Ybbd8"' 88  `"Ybbd8"'
+ aa,    ,88                            d8'
+  "Y8bbdP"                            d8'
+
+░▒▓ ◄ ───────────── end of line · ride the grid ───────────────────  ▓▒░
+```
+
 
 # gitCycle
 
