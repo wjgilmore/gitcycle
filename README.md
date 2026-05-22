@@ -11,6 +11,10 @@ A terminal UI for exploring the git repository you're standing in and the GitHub
 - Recent commits (focus with `c`, press `Enter` for a full commit detail: author, message, file-by-file stats)
 - Open pull requests
 
+Pressing `Enter` on a focused commit opens a detail screen showing the commit metadata, full message, and per-file change stats:
+
+![github-tui commit detail](screenshots/commit-detail.png)
+
 **Org tab** — organization-wide views (org auto-detected from `origin` remote)
 - **Activity** sub-view: recent PRs and issues grouped by author
 - **Repos** sub-view: searchable list of all non-archived org repos, sorted by most recently pushed. Press `Enter` on a repo to drill in and see top contributors, recent commits, and recent PRs for that specific repo.
