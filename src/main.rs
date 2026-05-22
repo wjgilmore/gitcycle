@@ -21,7 +21,10 @@ use std::{
     time::Duration,
 };
 
-use data::{Commit, CommitDetail, Contributor, PullRequest, RepoInfo, RepoSummary, UserActivity};
+use data::{
+    Commit, CommitDetail, Contributor, OrgMember, PullRequest, RepoInfo, RepoSummary, UserActivity,
+    UserCommit, UserPr,
+};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Screen {
@@ -29,12 +32,14 @@ enum Screen {
     Org,
     RepoDetail,
     CommitDetail,
+    UserDetail,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum OrgSubview {
     Activity,
     Repos,
+    Users,
 }
 
 struct RepoListState {
@@ -59,6 +64,38 @@ impl RepoListState {
     }
 }
 
+struct UserListState {
+    members: Vec<OrgMember>,
+    error: Option<String>,
+    loaded: bool,
+    filter: String,
+    filtering: bool,
+    list_state: ListState,
+}
+
+impl UserListState {
+    fn new() -> Self {
+        Self {
+            members: Vec::new(),
+            error: None,
+            loaded: false,
+            filter: String::new(),
+            filtering: false,
+            list_state: ListState::default(),
+        }
+    }
+}
+
+struct UserDetailState {
+    login: String,
+    commits: Vec<UserCommit>,
+    commits_err: Option<String>,
+    submitted_prs: Vec<UserPr>,
+    submitted_err: Option<String>,
+    reviewed_prs: Vec<UserPr>,
+    reviewed_err: Option<String>,
+}
+
 struct OrgState {
     name: Option<String>,
     detect_err: Option<String>,
@@ -67,6 +104,7 @@ struct OrgState {
     activity_loaded: bool,
     subview: OrgSubview,
     repos: RepoListState,
+    users: UserListState,
 }
 
 struct RepoDetailState {
@@ -95,6 +133,7 @@ struct App {
     org: OrgState,
     org_scroll: u16,
     repo_detail: Option<RepoDetailState>,
+    user_detail: Option<UserDetailState>,
     bg_rx: Option<Receiver<BgMessage>>,
 }
 
@@ -107,6 +146,7 @@ struct CommitDetailView {
 enum BgMessage {
     Activity(Result<Vec<UserActivity>, String>),
     Repos(Result<Vec<RepoInfo>, String>),
+    Members(Result<Vec<OrgMember>, String>),
 }
 
 fn spawn_org_prefetch(org: String) -> Receiver<BgMessage> {
@@ -119,9 +159,16 @@ fn spawn_org_prefetch(org: String) -> Receiver<BgMessage> {
         let _ = tx_act.send(BgMessage::Activity(result));
     });
 
+    let tx_repos = tx.clone();
+    let org_repos = org.clone();
     thread::spawn(move || {
-        let result = data::org_repos(&org).map_err(|e| format!("{:#}", e));
-        let _ = tx.send(BgMessage::Repos(result));
+        let result = data::org_repos(&org_repos).map_err(|e| format!("{:#}", e));
+        let _ = tx_repos.send(BgMessage::Repos(result));
+    });
+
+    thread::spawn(move || {
+        let result = data::org_members(&org).map_err(|e| format!("{:#}", e));
+        let _ = tx.send(BgMessage::Members(result));
     });
 
     rx
@@ -168,9 +215,11 @@ impl App {
                 activity_loaded: false,
                 subview: OrgSubview::Activity,
                 repos: RepoListState::new(),
+                users: UserListState::new(),
             },
             org_scroll: 0,
             repo_detail: None,
+            user_detail: None,
             bg_rx,
         }
     }
@@ -203,6 +252,20 @@ impl App {
                 Ok(BgMessage::Repos(Err(e))) => {
                     self.org.repos.loaded = true;
                     self.org.repos.error = Some(e);
+                }
+                Ok(BgMessage::Members(Ok(m))) => {
+                    self.org.users.members = m;
+                    self.org.users.loaded = true;
+                    self.org.users.error = None;
+                    if !self.org.users.members.is_empty()
+                        && self.org.users.list_state.selected().is_none()
+                    {
+                        self.org.users.list_state.select(Some(0));
+                    }
+                }
+                Ok(BgMessage::Members(Err(e))) => {
+                    self.org.users.loaded = true;
+                    self.org.users.error = Some(e);
                 }
                 Err(_) => break,
             }
@@ -275,17 +338,26 @@ impl App {
     fn reload(&mut self) {
         let screen = self.screen;
         let prev_subview = self.org.subview;
-        let prev_detail_name = self.repo_detail.as_ref().map(|d| d.full_name.clone());
+        let prev_repo_name = self.repo_detail.as_ref().map(|d| d.full_name.clone());
+        let prev_user_login = self.user_detail.as_ref().map(|d| d.login.clone());
         *self = App::load_repo();
         self.screen = screen;
         self.org.subview = prev_subview;
         match screen {
             Screen::Repo | Screen::Org => {}
             Screen::RepoDetail => {
-                if let Some(full) = prev_detail_name {
+                if let Some(full) = prev_repo_name {
                     self.open_repo_detail(full);
                 } else {
                     self.screen = Screen::Org;
+                }
+            }
+            Screen::UserDetail => {
+                if let Some(login) = prev_user_login {
+                    self.open_user_detail(login);
+                } else {
+                    self.screen = Screen::Org;
+                    self.org.subview = OrgSubview::Users;
                 }
             }
             Screen::CommitDetail => {
@@ -408,6 +480,84 @@ impl App {
             self.org.repos.list_state.select(Some(0));
         }
     }
+
+    fn filtered_user_indices(&self) -> Vec<usize> {
+        let q = self.org.users.filter.to_ascii_lowercase();
+        self.org
+            .users
+            .members
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| q.is_empty() || m.login.to_ascii_lowercase().contains(&q))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    fn move_user_selection(&mut self, delta: i32) {
+        let indices = self.filtered_user_indices();
+        if indices.is_empty() {
+            self.org.users.list_state.select(None);
+            return;
+        }
+        let cur = self.org.users.list_state.selected().unwrap_or(0);
+        let len = indices.len() as i32;
+        let mut next = cur as i32 + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len {
+            next = len - 1;
+        }
+        self.org.users.list_state.select(Some(next as usize));
+    }
+
+    fn reset_user_selection(&mut self) {
+        let indices = self.filtered_user_indices();
+        if indices.is_empty() {
+            self.org.users.list_state.select(None);
+        } else {
+            self.org.users.list_state.select(Some(0));
+        }
+    }
+
+    fn open_user_detail(&mut self, login: String) {
+        let org = self.org.name.clone().unwrap_or_default();
+        let mut detail = UserDetailState {
+            login: login.clone(),
+            commits: Vec::new(),
+            commits_err: None,
+            submitted_prs: Vec::new(),
+            submitted_err: None,
+            reviewed_prs: Vec::new(),
+            reviewed_err: None,
+        };
+
+        if org.is_empty() {
+            detail.commits_err = Some("no org detected".into());
+        } else {
+            match data::user_recent_commits(&org, &login, 15) {
+                Ok(c) => detail.commits = c,
+                Err(e) => detail.commits_err = Some(format!("{:#}", e)),
+            }
+            match data::user_submitted_prs(&org, &login, 15) {
+                Ok(p) => detail.submitted_prs = p,
+                Err(e) => detail.submitted_err = Some(format!("{:#}", e)),
+            }
+            match data::user_reviewed_prs(&org, &login, 15) {
+                Ok(p) => detail.reviewed_prs = p,
+                Err(e) => detail.reviewed_err = Some(format!("{:#}", e)),
+            }
+        }
+
+        self.user_detail = Some(detail);
+        self.screen = Screen::UserDetail;
+    }
+
+    fn close_user_detail(&mut self) {
+        self.user_detail = None;
+        self.screen = Screen::Org;
+        self.org.subview = OrgSubview::Users;
+    }
 }
 
 fn main() -> Result<()> {
@@ -472,12 +622,38 @@ fn run_app<B: ratatui::backend::Backend>(
                     }
                     continue;
                 }
+                if app.screen == Screen::Org
+                    && app.org.subview == OrgSubview::Users
+                    && app.org.users.filtering
+                {
+                    match key.code {
+                        KeyCode::Esc => {
+                            app.org.users.filter.clear();
+                            app.org.users.filtering = false;
+                            app.reset_user_selection();
+                        }
+                        KeyCode::Enter => {
+                            app.org.users.filtering = false;
+                        }
+                        KeyCode::Backspace => {
+                            app.org.users.filter.pop();
+                            app.reset_user_selection();
+                        }
+                        KeyCode::Char(c) => {
+                            app.org.users.filter.push(c);
+                            app.reset_user_selection();
+                        }
+                        _ => {}
+                    }
+                    continue;
+                }
 
                 match key.code {
                     KeyCode::Char('q') => return Ok(()),
                     KeyCode::Esc => match app.screen {
                         Screen::RepoDetail => app.close_repo_detail(),
                         Screen::CommitDetail => app.close_commit_detail(),
+                        Screen::UserDetail => app.close_user_detail(),
                         Screen::Repo if app.commits_focused => app.unfocus_commits(),
                         _ => return Ok(()),
                     },
@@ -485,38 +661,55 @@ fn run_app<B: ratatui::backend::Backend>(
                     KeyCode::Char('1') => {
                         app.repo_detail = None;
                         app.commit_detail = None;
+                        app.user_detail = None;
                         app.screen = Screen::Repo;
                     }
                     KeyCode::Char('2') => {
                         app.repo_detail = None;
                         app.commit_detail = None;
+                        app.user_detail = None;
                         app.commits_focused = false;
                         app.screen = Screen::Org;
                     }
                     KeyCode::Tab | KeyCode::Right => {
                         app.repo_detail = None;
                         app.commit_detail = None;
+                        app.user_detail = None;
                         app.commits_focused = false;
                         app.screen = match app.screen {
                             Screen::Repo => Screen::Org,
                             Screen::Org => Screen::Repo,
-                            Screen::RepoDetail | Screen::CommitDetail => Screen::Repo,
+                            Screen::RepoDetail
+                            | Screen::CommitDetail
+                            | Screen::UserDetail => Screen::Repo,
                         };
                     }
                     KeyCode::BackTab | KeyCode::Left => {
                         app.repo_detail = None;
                         app.commit_detail = None;
+                        app.user_detail = None;
                         app.commits_focused = false;
                         app.screen = match app.screen {
                             Screen::Repo => Screen::Org,
                             Screen::Org => Screen::Repo,
-                            Screen::RepoDetail | Screen::CommitDetail => Screen::Repo,
+                            Screen::RepoDetail
+                            | Screen::CommitDetail
+                            | Screen::UserDetail => Screen::Repo,
                         };
                     }
-                    KeyCode::Char('[') | KeyCode::Char(']') if app.screen == Screen::Org => {
+                    KeyCode::Char(']') if app.screen == Screen::Org => {
                         let next = match app.org.subview {
                             OrgSubview::Activity => OrgSubview::Repos,
+                            OrgSubview::Repos => OrgSubview::Users,
+                            OrgSubview::Users => OrgSubview::Activity,
+                        };
+                        app.switch_subview(next);
+                    }
+                    KeyCode::Char('[') if app.screen == Screen::Org => {
+                        let next = match app.org.subview {
+                            OrgSubview::Activity => OrgSubview::Users,
                             OrgSubview::Repos => OrgSubview::Activity,
+                            OrgSubview::Users => OrgSubview::Repos,
                         };
                         app.switch_subview(next);
                     }
@@ -602,6 +795,27 @@ fn handle_screen_key(app: &mut App, code: KeyCode) {
                 }
                 _ => {}
             },
+            OrgSubview::Users => match code {
+                KeyCode::Down | KeyCode::Char('j') => app.move_user_selection(1),
+                KeyCode::Up | KeyCode::Char('k') => app.move_user_selection(-1),
+                KeyCode::PageDown => app.move_user_selection(10),
+                KeyCode::PageUp => app.move_user_selection(-10),
+                KeyCode::Home | KeyCode::Char('g') => app.move_user_selection(-9999),
+                KeyCode::End | KeyCode::Char('G') => app.move_user_selection(9999),
+                KeyCode::Char('/') => {
+                    app.org.users.filtering = true;
+                }
+                KeyCode::Enter => {
+                    let indices = app.filtered_user_indices();
+                    if let Some(sel) = app.org.users.list_state.selected() {
+                        if let Some(&actual) = indices.get(sel) {
+                            let login = app.org.users.members[actual].login.clone();
+                            app.open_user_detail(login);
+                        }
+                    }
+                }
+                _ => {}
+            },
         },
         _ => {}
     }
@@ -623,6 +837,7 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         Screen::Org => render_org_screen(f, outer[1], app),
         Screen::RepoDetail => render_repo_detail_screen(f, outer[1], app),
         Screen::CommitDetail => render_commit_detail_screen(f, outer[1], app),
+        Screen::UserDetail => render_user_detail_screen(f, outer[1], app),
     }
     render_footer(f, outer[2], app);
 }
@@ -635,10 +850,10 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let titles = vec![Line::from("1 Repo"), Line::from(org_label)];
     let select = match app.screen {
         Screen::Repo | Screen::CommitDetail => 0,
-        Screen::Org | Screen::RepoDetail => 1,
+        Screen::Org | Screen::RepoDetail | Screen::UserDetail => 1,
     };
     let tabs = Tabs::new(titles)
-        .block(Block::default().borders(Borders::ALL).title(" github-tui "))
+        .block(Block::default().borders(Borders::ALL).title(" gitcycle "))
         .select(select)
         .style(Style::default().fg(Color::Gray))
         .highlight_style(
@@ -860,14 +1075,20 @@ fn render_org_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
     match app.org.subview {
         OrgSubview::Activity => render_org_activity(f, rows[1], app),
         OrgSubview::Repos => render_org_repos(f, rows[1], app),
+        OrgSubview::Users => render_org_users(f, rows[1], app),
     }
 }
 
 fn render_subtabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let titles = vec![Line::from("Activity"), Line::from("Repos")];
+    let titles = vec![
+        Line::from("Activity"),
+        Line::from("Repos"),
+        Line::from("Users"),
+    ];
     let select = match app.org.subview {
         OrgSubview::Activity => 0,
         OrgSubview::Repos => 1,
+        OrgSubview::Users => 2,
     };
     let tabs = Tabs::new(titles)
         .block(Block::default().borders(Borders::ALL).title(" view "))
@@ -1231,6 +1452,292 @@ fn colorize_stat_line(s: &str) -> Vec<Span<'static>> {
     out
 }
 
+fn render_org_users(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(3), Constraint::Min(0)])
+        .split(area);
+
+    render_user_filter_input(f, rows[0], app);
+    render_user_list(f, rows[1], app);
+}
+
+fn render_user_filter_input(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let mode = if app.org.users.filtering {
+        " filter (typing — Enter to confirm, Esc to clear) "
+    } else if app.org.users.filter.is_empty() {
+        " filter (/ to start) "
+    } else {
+        " filter (/ to edit, Esc to clear) "
+    };
+    let cursor = if app.org.users.filtering { "▏" } else { "" };
+    let body = format!("{}{}", app.org.users.filter, cursor);
+    let style = if app.org.users.filtering {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let block = Block::default().borders(Borders::ALL).title(mode);
+    f.render_widget(Paragraph::new(body).style(style).block(block), area);
+}
+
+fn render_user_list(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let title = match &app.org.name {
+        Some(n) => format!(" users — {} ", n),
+        None => " users ".to_string(),
+    };
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    if let Some(err) = &app.org.detect_err {
+        f.render_widget(
+            Paragraph::new(format!("could not detect org: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    if !app.org.users.loaded {
+        f.render_widget(
+            Paragraph::new("loading…")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    if let Some(err) = &app.org.users.error {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    let indices = app.filtered_user_indices();
+    if indices.is_empty() {
+        let msg = if app.org.users.filter.is_empty() {
+            "no visible members"
+        } else {
+            "no matches"
+        };
+        f.render_widget(
+            Paragraph::new(msg.to_string())
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = indices
+        .iter()
+        .map(|&i| {
+            let m = &app.org.users.members[i];
+            ListItem::new(Line::from(vec![Span::styled(
+                format!("@{}", m.login),
+                Style::default().fg(Color::Cyan),
+            )]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut state = app.org.users.list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
+}
+
+fn render_user_detail_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let Some(detail) = &app.user_detail else {
+        return;
+    };
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(3),
+            Constraint::Percentage(34),
+            Constraint::Percentage(33),
+            Constraint::Percentage(33),
+        ])
+        .split(area);
+
+    render_user_detail_header(f, rows[0], detail, app.org.name.as_deref());
+    render_user_commits_panel(f, rows[1], detail);
+    render_user_prs_panel(
+        f,
+        rows[2],
+        " PRs submitted ",
+        &detail.submitted_prs,
+        detail.submitted_err.as_deref(),
+        "no submitted PRs",
+        false,
+    );
+    render_user_prs_panel(
+        f,
+        rows[3],
+        " PRs reviewed ",
+        &detail.reviewed_prs,
+        detail.reviewed_err.as_deref(),
+        "no reviewed PRs",
+        true,
+    );
+}
+
+fn render_user_detail_header(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    detail: &UserDetailState,
+    org: Option<&str>,
+) {
+    let title = format!(" @{} ", detail.login);
+    let block = Block::default().borders(Borders::ALL).title(title);
+    let org_label = org.unwrap_or("(unknown)");
+    let line = Line::from(vec![
+        Span::styled("org: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(org_label.to_string()),
+        Span::raw("   "),
+        Span::styled("commits: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(detail.commits.len().to_string()),
+        Span::raw("   "),
+        Span::styled("submitted: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(detail.submitted_prs.len().to_string()),
+        Span::raw("   "),
+        Span::styled("reviewed: ", Style::default().fg(Color::DarkGray)),
+        Span::raw(detail.reviewed_prs.len().to_string()),
+    ]);
+    f.render_widget(Paragraph::new(vec![line]).block(block), area);
+}
+
+fn render_user_commits_panel(f: &mut ratatui::Frame, area: Rect, detail: &UserDetailState) {
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" recent commits ");
+    if let Some(err) = &detail.commits_err {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if detail.commits.is_empty() {
+        f.render_widget(
+            Paragraph::new("no recent commits")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = detail
+        .commits
+        .iter()
+        .map(|c| {
+            ListItem::new(Line::from(vec![
+                Span::styled(format!("{} ", c.sha), Style::default().fg(Color::Yellow)),
+                Span::styled(
+                    format!("{:<28}", truncate(&c.repo, 28)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(" "),
+                Span::raw(c.subject.clone()),
+                Span::styled(
+                    format!("  ({})", c.date),
+                    Style::default().fg(Color::DarkGray),
+                ),
+            ]))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn render_user_prs_panel(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    title: &str,
+    prs: &[UserPr],
+    err: Option<&str>,
+    empty_msg: &str,
+    show_author: bool,
+) {
+    let block = Block::default().borders(Borders::ALL).title(title.to_string());
+    if let Some(err) = err {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    if prs.is_empty() {
+        f.render_widget(
+            Paragraph::new(empty_msg.to_string())
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+    let items: Vec<ListItem> = prs
+        .iter()
+        .map(|p| {
+            let (label, color) = pr_state_style(&p.state, p.is_draft);
+            let mut spans = vec![
+                Span::styled(format!("#{:<5}", p.number), Style::default().fg(Color::Green)),
+                Span::styled(format!("{:<7}", label), Style::default().fg(color)),
+                Span::styled(
+                    format!("{:<28}", truncate(&p.repo, 28)),
+                    Style::default().fg(Color::Green),
+                ),
+                Span::raw(" "),
+                Span::raw(p.title.clone()),
+            ];
+            if show_author && !p.author.is_empty() {
+                spans.push(Span::styled(
+                    format!("  @{}", p.author),
+                    Style::default().fg(Color::Cyan),
+                ));
+            }
+            spans.push(Span::styled(
+                format!("  ({})", p.updated_at),
+                Style::default().fg(Color::DarkGray),
+            ));
+            ListItem::new(Line::from(spans))
+        })
+        .collect();
+    f.render_widget(List::new(items).block(block), area);
+}
+
+fn pr_state_style(state: &str, is_draft: bool) -> (&'static str, Color) {
+    if is_draft {
+        return ("draft", Color::DarkGray);
+    }
+    match state.to_ascii_lowercase().as_str() {
+        "open" => ("open", Color::Green),
+        "merged" => ("merged", Color::Magenta),
+        "closed" => ("closed", Color::Red),
+        _ => ("?", Color::Gray),
+    }
+}
+
 fn render_repo_detail_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let Some(detail) = &app.repo_detail else {
         return;
@@ -1444,9 +1951,36 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
                         ]);
                     }
                 }
+                OrgSubview::Users => {
+                    if app.org.users.filtering {
+                        spans = vec![
+                            Span::styled(
+                                "type to filter",
+                                Style::default().add_modifier(Modifier::BOLD),
+                            ),
+                            Span::raw("  "),
+                            Span::styled("Backspace", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(" delete  "),
+                            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(" confirm  "),
+                            Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(" clear"),
+                        ];
+                    } else {
+                        spans.extend([
+                            Span::raw("  "),
+                            Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(" select  "),
+                            Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(" open  "),
+                            Span::styled("/", Style::default().add_modifier(Modifier::BOLD)),
+                            Span::raw(" filter"),
+                        ]);
+                    }
+                }
             }
         }
-        Screen::RepoDetail => {
+        Screen::RepoDetail | Screen::UserDetail => {
             spans.extend([
                 Span::raw("  "),
                 Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),

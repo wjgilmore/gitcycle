@@ -598,3 +598,171 @@ pub fn split_full_name(full: &str) -> Option<(String, String)> {
         Some((owner, repo))
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct OrgMember {
+    pub login: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawOrgMember {
+    login: String,
+}
+
+pub fn org_members(org: &str) -> Result<Vec<OrgMember>> {
+    let stdout = run_gh(&[
+        "api",
+        "--paginate",
+        &format!("/orgs/{}/members?per_page=100", org),
+    ])
+    .map_err(|e| {
+        let msg = format!("{:#}", e);
+        if msg.contains("Not Found") || msg.contains("HTTP 404") {
+            anyhow::anyhow!("'{}' is not a GitHub organization (or members are not visible)", org)
+        } else {
+            e
+        }
+    })?;
+
+    // `--paginate` on a list endpoint concatenates page arrays. If multiple pages
+    // ran, the stream looks like "][" between pages.
+    let body = String::from_utf8_lossy(&stdout).replace("][", ",");
+    let raw: Vec<RawOrgMember> =
+        serde_json::from_str(&body).context("failed to parse org members JSON")?;
+    let mut members: Vec<OrgMember> = raw
+        .into_iter()
+        .map(|m| OrgMember { login: m.login })
+        .collect();
+    members.sort_by(|a, b| a.login.to_ascii_lowercase().cmp(&b.login.to_ascii_lowercase()));
+    Ok(members)
+}
+
+#[derive(Debug, Clone)]
+pub struct UserCommit {
+    pub sha: String,
+    pub repo: String,
+    pub subject: String,
+    pub date: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSearchCommit {
+    sha: String,
+    commit: RawSearchCommitInner,
+    repository: CommitSearchRepo,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitSearchRepo {
+    #[serde(rename = "fullName")]
+    full_name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSearchCommitInner {
+    author: RawSearchCommitAuthor,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawSearchCommitAuthor {
+    date: String,
+}
+
+pub fn user_recent_commits(org: &str, user: &str, limit: usize) -> Result<Vec<UserCommit>> {
+    let stdout = run_gh(&[
+        "search",
+        "commits",
+        "--owner",
+        org,
+        "--author",
+        user,
+        "--sort",
+        "author-date",
+        "--order",
+        "desc",
+        "--limit",
+        &limit.to_string(),
+        "--json",
+        "sha,commit,repository",
+    ])
+    .context("gh search commits failed")?;
+    let raw: Vec<RawSearchCommit> =
+        serde_json::from_slice(&stdout).context("failed to parse user commits JSON")?;
+    Ok(raw
+        .into_iter()
+        .map(|c| {
+            let subject = c.commit.message.lines().next().unwrap_or("").to_string();
+            let short_sha: String = c.sha.chars().take(7).collect();
+            UserCommit {
+                sha: short_sha,
+                repo: c.repository.full_name,
+                subject,
+                date: humanize_iso(&c.commit.author.date),
+            }
+        })
+        .collect())
+}
+
+#[derive(Debug, Clone)]
+pub struct UserPr {
+    pub number: u64,
+    pub title: String,
+    pub repo: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub author: String,
+    pub updated_at: String,
+}
+
+fn fetch_user_prs(args: &[&str]) -> Result<Vec<UserPr>> {
+    let stdout = run_gh(args).context("gh search prs failed")?;
+    let raw: Vec<SearchPr> =
+        serde_json::from_slice(&stdout).context("failed to parse user PR JSON")?;
+    Ok(raw
+        .into_iter()
+        .map(|p| UserPr {
+            number: p.number,
+            title: p.title,
+            repo: p.repository.name_with_owner,
+            state: p.state,
+            is_draft: p.is_draft,
+            author: p.author.map(|a| a.login).unwrap_or_default(),
+            updated_at: humanize_iso(&p.updated_at),
+        })
+        .collect())
+}
+
+pub fn user_submitted_prs(org: &str, user: &str, limit: usize) -> Result<Vec<UserPr>> {
+    fetch_user_prs(&[
+        "search",
+        "prs",
+        "--owner",
+        org,
+        "--author",
+        user,
+        "--sort",
+        "updated",
+        "--limit",
+        &limit.to_string(),
+        "--json",
+        "number,title,author,repository,state,isDraft,updatedAt",
+    ])
+}
+
+pub fn user_reviewed_prs(org: &str, user: &str, limit: usize) -> Result<Vec<UserPr>> {
+    fetch_user_prs(&[
+        "search",
+        "prs",
+        "--owner",
+        org,
+        "--reviewed-by",
+        user,
+        "--sort",
+        "updated",
+        "--limit",
+        &limit.to_string(),
+        "--json",
+        "number,title,author,repository,state,isDraft,updatedAt",
+    ])
+}
