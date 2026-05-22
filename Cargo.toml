@@ -1,0 +1,15 @@
+[package]
+name = "github-tui"
+version = "0.1.0"
+edition = "2024"
+authors = ["Jason Gilmore <jason.gilmore@adalo.com>"]
+license = "MIT"
+description = "Terminal UI for exploring the current git repository and its GitHub organization."
+readme = "README.md"
+
+[dependencies]
+ratatui = "0.29"
+crossterm = "0.28"
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
