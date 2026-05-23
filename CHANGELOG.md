@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-05-23
+
 ### Added
 
 - **Dirty-files diff view** on the Repo tab. Press `d` to focus the dirty-files panel, `↑/↓` to select a file, and `Enter` to view its diff inline — the recent-commits and open-PRs panels are replaced by a color-coded unified diff (green/red/cyan for `+`/`-`/`@@` lines). Untracked files render as a full-file addition; tracked files run `git diff HEAD --`. `Esc` closes the diff and restores the original panels.
@@ -42,5 +44,6 @@ Initial public release on [crates.io](https://crates.io/crates/gitcycle).
 - Cross-platform browser open (`open` on macOS, `xdg-open` on Linux, `start` on Windows).
 - Tron-inspired ASCII banner in the README.
 
-[Unreleased]: https://github.com/wjgilmore/gitcycle/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/wjgilmore/gitcycle/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/wjgilmore/gitcycle/releases/tag/v0.2.0
 [0.1.0]: https://github.com/wjgilmore/gitcycle/releases/tag/v0.1.0
