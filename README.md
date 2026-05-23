@@ -115,6 +115,17 @@ gitcycle
 | `Tab`, `←`/`→` | cycle tabs |
 | `Esc` | back / close detail / unfocus panel |
 
+**Dashboard tab**
+| Key | Action |
+| --- | --- |
+| `v` | focus the "awaiting your review" panel |
+| `p` | focus the "your open PRs" panel |
+| `n` | focus the "notifications" panel |
+| `c` | focus the "your recent commits" panel |
+| `↑`/`↓`, `j`/`k`, `PgUp`/`PgDn`, `g`/`G` | move selection within the focused panel |
+| `Enter` | open detail for the selected item (PR description, commit diff, or notification summary) |
+| `o` | open the selected row (or current detail screen) in your browser |
+
 **Repo tab**
 | Key | Action |
 | --- | --- |

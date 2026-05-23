@@ -22,8 +22,8 @@ use std::{
 };
 
 use data::{
-    Commit, CommitDetail, Contributor, DirtyFile, Notification, OrgMember, PullRequest, RepoInfo,
-    RepoSummary, ReviewRequestedPr, UserActivity, UserCommit, UserPr,
+    Commit, CommitDetail, Contributor, DirtyFile, Notification, OrgMember, PrDetail, PullRequest,
+    RepoInfo, RepoSummary, ReviewRequestedPr, UserActivity, UserCommit, UserPr,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -34,6 +34,14 @@ enum Screen {
     RepoDetail,
     CommitDetail,
     UserDetail,
+    PrDetail,
+    NotificationDetail,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DetailOrigin {
+    Repo,
+    Dashboard,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -142,6 +150,8 @@ struct App {
     org_scroll: u16,
     repo_detail: Option<RepoDetailState>,
     user_detail: Option<UserDetailState>,
+    pr_detail: Option<PrDetailView>,
+    notification_detail: Option<NotificationDetailView>,
     bg_rx: Option<Receiver<BgMessage>>,
 }
 
@@ -149,15 +159,29 @@ struct DashboardState {
     review_prs: Vec<ReviewRequestedPr>,
     review_prs_err: Option<String>,
     review_prs_loaded: bool,
+    review_focused: bool,
+    review_list_state: ListState,
     my_prs: Vec<UserPr>,
     my_prs_err: Option<String>,
     my_prs_loaded: bool,
+    my_prs_focused: bool,
+    my_prs_list_state: ListState,
     notifications: Vec<Notification>,
     notifications_err: Option<String>,
     notifications_loaded: bool,
+    notifications_focused: bool,
+    notifications_list_state: ListState,
     my_commits: Vec<UserCommit>,
     my_commits_err: Option<String>,
     my_commits_loaded: bool,
+    my_commits_focused: bool,
+    my_commits_list_state: ListState,
+}
+
+struct PrDetailView {
+    detail: Option<PrDetail>,
+    error: Option<String>,
+    scroll: u16,
 }
 
 impl DashboardState {
@@ -166,16 +190,38 @@ impl DashboardState {
             review_prs: Vec::new(),
             review_prs_err: None,
             review_prs_loaded: false,
+            review_focused: false,
+            review_list_state: ListState::default(),
             my_prs: Vec::new(),
             my_prs_err: None,
             my_prs_loaded: false,
+            my_prs_focused: false,
+            my_prs_list_state: ListState::default(),
             notifications: Vec::new(),
             notifications_err: None,
             notifications_loaded: false,
+            notifications_focused: false,
+            notifications_list_state: ListState::default(),
             my_commits: Vec::new(),
             my_commits_err: None,
             my_commits_loaded: false,
+            my_commits_focused: false,
+            my_commits_list_state: ListState::default(),
         }
+    }
+
+    fn any_focused(&self) -> bool {
+        self.review_focused
+            || self.my_prs_focused
+            || self.notifications_focused
+            || self.my_commits_focused
+    }
+
+    fn unfocus_all(&mut self) {
+        self.review_focused = false;
+        self.my_prs_focused = false;
+        self.notifications_focused = false;
+        self.my_commits_focused = false;
     }
 }
 
@@ -183,6 +229,11 @@ struct CommitDetailView {
     detail: Option<CommitDetail>,
     error: Option<String>,
     scroll: u16,
+    origin: DetailOrigin,
+}
+
+struct NotificationDetailView {
+    notification: Notification,
 }
 
 enum BgMessage {
@@ -353,6 +404,8 @@ impl App {
             org_scroll: 0,
             repo_detail: None,
             user_detail: None,
+            pr_detail: None,
+            notification_detail: None,
             bg_rx,
         }
     }
@@ -404,6 +457,11 @@ impl App {
                     self.dashboard.review_prs = p;
                     self.dashboard.review_prs_loaded = true;
                     self.dashboard.review_prs_err = None;
+                    if !self.dashboard.review_prs.is_empty()
+                        && self.dashboard.review_list_state.selected().is_none()
+                    {
+                        self.dashboard.review_list_state.select(Some(0));
+                    }
                 }
                 Ok(BgMessage::Review(Err(e))) => {
                     self.dashboard.review_prs_loaded = true;
@@ -484,11 +542,13 @@ impl App {
                 detail: Some(d),
                 error: None,
                 scroll: 0,
+                origin: DetailOrigin::Repo,
             },
             Err(e) => CommitDetailView {
                 detail: None,
                 error: Some(format!("{:#}", e)),
                 scroll: 0,
+                origin: DetailOrigin::Repo,
             },
         };
         self.commit_detail = Some(view);
@@ -496,8 +556,16 @@ impl App {
     }
 
     fn close_commit_detail(&mut self) {
+        let origin = self
+            .commit_detail
+            .as_ref()
+            .map(|v| v.origin)
+            .unwrap_or(DetailOrigin::Repo);
         self.commit_detail = None;
-        self.screen = Screen::Repo;
+        self.screen = match origin {
+            DetailOrigin::Repo => Screen::Repo,
+            DetailOrigin::Dashboard => Screen::Dashboard,
+        };
     }
 
     fn switch_subview(&mut self, next: OrgSubview) {
@@ -531,6 +599,9 @@ impl App {
             }
             Screen::CommitDetail => {
                 self.screen = Screen::Repo;
+            }
+            Screen::PrDetail | Screen::NotificationDetail => {
+                self.screen = Screen::Dashboard;
             }
         }
     }
@@ -727,6 +798,271 @@ impl App {
         self.screen = Screen::Org;
         self.org.subview = OrgSubview::Users;
     }
+
+    fn focus_review(&mut self) {
+        if self.dashboard.review_prs.is_empty() {
+            return;
+        }
+        self.dashboard.unfocus_all();
+        self.dashboard.review_focused = true;
+        if self.dashboard.review_list_state.selected().is_none() {
+            self.dashboard.review_list_state.select(Some(0));
+        }
+    }
+
+    fn move_review_selection(&mut self, delta: i32) {
+        if self.dashboard.review_prs.is_empty() {
+            return;
+        }
+        let cur = self.dashboard.review_list_state.selected().unwrap_or(0) as i32;
+        let len = self.dashboard.review_prs.len() as i32;
+        let mut next = cur + delta;
+        if next < 0 {
+            next = 0;
+        }
+        if next >= len {
+            next = len - 1;
+        }
+        self.dashboard.review_list_state.select(Some(next as usize));
+    }
+
+    fn selected_review_pr(&self) -> Option<&ReviewRequestedPr> {
+        let idx = self.dashboard.review_list_state.selected()?;
+        self.dashboard.review_prs.get(idx)
+    }
+
+    fn open_pr_detail_for_selected_review(&mut self) {
+        let Some(pr) = self.selected_review_pr() else {
+            return;
+        };
+        let full = pr.repo.clone();
+        let number = pr.number;
+        let Some((owner, repo)) = data::split_full_name(&full) else {
+            return;
+        };
+        let view = match data::pr_detail(&owner, &repo, number) {
+            Ok(d) => PrDetailView {
+                detail: Some(d),
+                error: None,
+                scroll: 0,
+            },
+            Err(e) => PrDetailView {
+                detail: None,
+                error: Some(format!("{:#}", e)),
+                scroll: 0,
+            },
+        };
+        self.pr_detail = Some(view);
+        self.screen = Screen::PrDetail;
+    }
+
+    fn close_pr_detail(&mut self) {
+        self.pr_detail = None;
+        self.screen = Screen::Dashboard;
+    }
+
+    fn open_selected_review_in_browser(&mut self) -> Option<String> {
+        let pr = self.selected_review_pr()?;
+        let url = format!("https://github.com/{}/pull/{}", pr.repo, pr.number);
+        match data::open_in_browser(&url) {
+            Ok(()) => None,
+            Err(e) => Some(format!("{:#}", e)),
+        }
+    }
+
+    fn open_pr_detail_in_browser(&self) -> Option<String> {
+        let view = self.pr_detail.as_ref()?;
+        let url = view.detail.as_ref()?.url.clone();
+        match data::open_in_browser(&url) {
+            Ok(()) => None,
+            Err(e) => Some(format!("{:#}", e)),
+        }
+    }
+
+    fn focus_my_prs(&mut self) {
+        if self.dashboard.my_prs.is_empty() {
+            return;
+        }
+        self.dashboard.unfocus_all();
+        self.dashboard.my_prs_focused = true;
+        if self.dashboard.my_prs_list_state.selected().is_none() {
+            self.dashboard.my_prs_list_state.select(Some(0));
+        }
+    }
+
+    fn move_my_prs_selection(&mut self, delta: i32) {
+        clamp_select(
+            &mut self.dashboard.my_prs_list_state,
+            self.dashboard.my_prs.len(),
+            delta,
+        );
+    }
+
+    fn selected_my_pr(&self) -> Option<&UserPr> {
+        let idx = self.dashboard.my_prs_list_state.selected()?;
+        self.dashboard.my_prs.get(idx)
+    }
+
+    fn open_pr_detail_for_selected_my_pr(&mut self) {
+        let Some(pr) = self.selected_my_pr() else {
+            return;
+        };
+        let full = pr.repo.clone();
+        let number = pr.number;
+        self.open_pr_detail_from(full, number);
+    }
+
+    fn open_selected_my_pr_in_browser(&self) -> Option<String> {
+        let pr = self.selected_my_pr()?;
+        let url = format!("https://github.com/{}/pull/{}", pr.repo, pr.number);
+        data::open_in_browser(&url).err().map(|e| format!("{:#}", e))
+    }
+
+    fn open_pr_detail_from(&mut self, full: String, number: u64) {
+        let Some((owner, repo)) = data::split_full_name(&full) else {
+            return;
+        };
+        let view = match data::pr_detail(&owner, &repo, number) {
+            Ok(d) => PrDetailView {
+                detail: Some(d),
+                error: None,
+                scroll: 0,
+            },
+            Err(e) => PrDetailView {
+                detail: None,
+                error: Some(format!("{:#}", e)),
+                scroll: 0,
+            },
+        };
+        self.pr_detail = Some(view);
+        self.screen = Screen::PrDetail;
+    }
+
+    fn focus_notifications(&mut self) {
+        if self.dashboard.notifications.is_empty() {
+            return;
+        }
+        self.dashboard.unfocus_all();
+        self.dashboard.notifications_focused = true;
+        if self.dashboard.notifications_list_state.selected().is_none() {
+            self.dashboard.notifications_list_state.select(Some(0));
+        }
+    }
+
+    fn move_notifications_selection(&mut self, delta: i32) {
+        clamp_select(
+            &mut self.dashboard.notifications_list_state,
+            self.dashboard.notifications.len(),
+            delta,
+        );
+    }
+
+    fn selected_notification(&self) -> Option<&Notification> {
+        let idx = self.dashboard.notifications_list_state.selected()?;
+        self.dashboard.notifications.get(idx)
+    }
+
+    fn open_notification_detail(&mut self) {
+        let Some(n) = self.selected_notification() else {
+            return;
+        };
+        self.notification_detail = Some(NotificationDetailView {
+            notification: n.clone(),
+        });
+        self.screen = Screen::NotificationDetail;
+    }
+
+    fn close_notification_detail(&mut self) {
+        self.notification_detail = None;
+        self.screen = Screen::Dashboard;
+    }
+
+    fn open_selected_notification_in_browser(&self) -> Option<String> {
+        let n = self.selected_notification()?;
+        data::open_in_browser(&n.web_url)
+            .err()
+            .map(|e| format!("{:#}", e))
+    }
+
+    fn open_notification_detail_in_browser(&self) -> Option<String> {
+        let v = self.notification_detail.as_ref()?;
+        data::open_in_browser(&v.notification.web_url)
+            .err()
+            .map(|e| format!("{:#}", e))
+    }
+
+    fn focus_my_commits(&mut self) {
+        if self.dashboard.my_commits.is_empty() {
+            return;
+        }
+        self.dashboard.unfocus_all();
+        self.dashboard.my_commits_focused = true;
+        if self.dashboard.my_commits_list_state.selected().is_none() {
+            self.dashboard.my_commits_list_state.select(Some(0));
+        }
+    }
+
+    fn move_my_commits_selection(&mut self, delta: i32) {
+        clamp_select(
+            &mut self.dashboard.my_commits_list_state,
+            self.dashboard.my_commits.len(),
+            delta,
+        );
+    }
+
+    fn selected_my_commit(&self) -> Option<&UserCommit> {
+        let idx = self.dashboard.my_commits_list_state.selected()?;
+        self.dashboard.my_commits.get(idx)
+    }
+
+    fn open_my_commit_detail(&mut self) {
+        let Some(c) = self.selected_my_commit() else {
+            return;
+        };
+        let Some((owner, repo)) = data::split_full_name(&c.repo) else {
+            return;
+        };
+        let sha = c.sha.clone();
+        let view = match data::org_commit_detail(&owner, &repo, &sha) {
+            Ok(d) => CommitDetailView {
+                detail: Some(d),
+                error: None,
+                scroll: 0,
+                origin: DetailOrigin::Dashboard,
+            },
+            Err(e) => CommitDetailView {
+                detail: None,
+                error: Some(format!("{:#}", e)),
+                scroll: 0,
+                origin: DetailOrigin::Dashboard,
+            },
+        };
+        self.commit_detail = Some(view);
+        self.screen = Screen::CommitDetail;
+    }
+
+    fn open_selected_my_commit_in_browser(&self) -> Option<String> {
+        let c = self.selected_my_commit()?;
+        let url = format!("https://github.com/{}/commit/{}", c.repo, c.sha);
+        data::open_in_browser(&url).err().map(|e| format!("{:#}", e))
+    }
+}
+
+fn clamp_select(state: &mut ListState, len: usize, delta: i32) {
+    if len == 0 {
+        state.select(None);
+        return;
+    }
+    let cur = state.selected().unwrap_or(0) as i32;
+    let mut next = cur + delta;
+    let max = len as i32 - 1;
+    if next < 0 {
+        next = 0;
+    }
+    if next > max {
+        next = max;
+    }
+    state.select(Some(next as usize));
 }
 
 fn main() -> Result<()> {
@@ -823,7 +1159,12 @@ fn run_app<B: ratatui::backend::Backend>(
                         Screen::RepoDetail => app.close_repo_detail(),
                         Screen::CommitDetail => app.close_commit_detail(),
                         Screen::UserDetail => app.close_user_detail(),
+                        Screen::PrDetail => app.close_pr_detail(),
+                        Screen::NotificationDetail => app.close_notification_detail(),
                         Screen::Repo if app.commits_focused => app.unfocus_commits(),
+                        Screen::Dashboard if app.dashboard.any_focused() => {
+                            app.dashboard.unfocus_all()
+                        }
                         _ => return Ok(()),
                     },
                     KeyCode::Char('r') => app.reload(),
@@ -831,6 +1172,8 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.repo_detail = None;
                         app.commit_detail = None;
                         app.user_detail = None;
+                        app.pr_detail = None;
+                        app.notification_detail = None;
                         app.commits_focused = false;
                         app.screen = Screen::Dashboard;
                     }
@@ -838,41 +1181,57 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.repo_detail = None;
                         app.commit_detail = None;
                         app.user_detail = None;
+                        app.pr_detail = None;
+                        app.notification_detail = None;
+                        app.dashboard.unfocus_all();
                         app.screen = Screen::Repo;
                     }
                     KeyCode::Char('3') => {
                         app.repo_detail = None;
                         app.commit_detail = None;
                         app.user_detail = None;
+                        app.pr_detail = None;
+                        app.notification_detail = None;
                         app.commits_focused = false;
+                        app.dashboard.unfocus_all();
                         app.screen = Screen::Org;
                     }
                     KeyCode::Tab | KeyCode::Right => {
                         app.repo_detail = None;
                         app.commit_detail = None;
                         app.user_detail = None;
+                        app.pr_detail = None;
+                        app.notification_detail = None;
                         app.commits_focused = false;
+                        app.dashboard.unfocus_all();
                         app.screen = match app.screen {
                             Screen::Dashboard => Screen::Repo,
                             Screen::Repo => Screen::Org,
                             Screen::Org => Screen::Dashboard,
                             Screen::RepoDetail
                             | Screen::CommitDetail
-                            | Screen::UserDetail => Screen::Dashboard,
+                            | Screen::UserDetail
+                            | Screen::PrDetail
+                            | Screen::NotificationDetail => Screen::Dashboard,
                         };
                     }
                     KeyCode::BackTab | KeyCode::Left => {
                         app.repo_detail = None;
                         app.commit_detail = None;
                         app.user_detail = None;
+                        app.pr_detail = None;
+                        app.notification_detail = None;
                         app.commits_focused = false;
+                        app.dashboard.unfocus_all();
                         app.screen = match app.screen {
                             Screen::Dashboard => Screen::Org,
                             Screen::Repo => Screen::Dashboard,
                             Screen::Org => Screen::Repo,
                             Screen::RepoDetail
                             | Screen::CommitDetail
-                            | Screen::UserDetail => Screen::Dashboard,
+                            | Screen::UserDetail
+                            | Screen::PrDetail
+                            | Screen::NotificationDetail => Screen::Dashboard,
                         };
                     }
                     KeyCode::Char(']') if app.screen == Screen::Org => {
@@ -892,6 +1251,31 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.switch_subview(next);
                     }
                     KeyCode::Char('c') if app.screen == Screen::Repo => app.focus_commits(),
+                    KeyCode::Char('v') if app.screen == Screen::Dashboard => app.focus_review(),
+                    KeyCode::Char('p') if app.screen == Screen::Dashboard => app.focus_my_prs(),
+                    KeyCode::Char('n') if app.screen == Screen::Dashboard => {
+                        app.focus_notifications()
+                    }
+                    KeyCode::Char('c') if app.screen == Screen::Dashboard => {
+                        app.focus_my_commits()
+                    }
+                    KeyCode::Char('o') if app.screen == Screen::Dashboard => {
+                        if app.dashboard.review_focused {
+                            let _ = app.open_selected_review_in_browser();
+                        } else if app.dashboard.my_prs_focused {
+                            let _ = app.open_selected_my_pr_in_browser();
+                        } else if app.dashboard.notifications_focused {
+                            let _ = app.open_selected_notification_in_browser();
+                        } else if app.dashboard.my_commits_focused {
+                            let _ = app.open_selected_my_commit_in_browser();
+                        }
+                    }
+                    KeyCode::Char('o') if app.screen == Screen::PrDetail => {
+                        let _ = app.open_pr_detail_in_browser();
+                    }
+                    KeyCode::Char('o') if app.screen == Screen::NotificationDetail => {
+                        let _ = app.open_notification_detail_in_browser();
+                    }
                     _ => {
                         handle_screen_key(app, key.code);
                     }
@@ -913,8 +1297,64 @@ fn handle_screen_key(app: &mut App, code: KeyCode) {
             KeyCode::Enter => app.open_commit_detail(),
             _ => {}
         },
+        Screen::Dashboard if app.dashboard.review_focused => match code {
+            KeyCode::Down | KeyCode::Char('j') => app.move_review_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_review_selection(-1),
+            KeyCode::PageDown => app.move_review_selection(10),
+            KeyCode::PageUp => app.move_review_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => app.move_review_selection(-9999),
+            KeyCode::End | KeyCode::Char('G') => app.move_review_selection(9999),
+            KeyCode::Enter => app.open_pr_detail_for_selected_review(),
+            _ => {}
+        },
+        Screen::Dashboard if app.dashboard.my_prs_focused => match code {
+            KeyCode::Down | KeyCode::Char('j') => app.move_my_prs_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_my_prs_selection(-1),
+            KeyCode::PageDown => app.move_my_prs_selection(10),
+            KeyCode::PageUp => app.move_my_prs_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => app.move_my_prs_selection(-9999),
+            KeyCode::End | KeyCode::Char('G') => app.move_my_prs_selection(9999),
+            KeyCode::Enter => app.open_pr_detail_for_selected_my_pr(),
+            _ => {}
+        },
+        Screen::Dashboard if app.dashboard.notifications_focused => match code {
+            KeyCode::Down | KeyCode::Char('j') => app.move_notifications_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_notifications_selection(-1),
+            KeyCode::PageDown => app.move_notifications_selection(10),
+            KeyCode::PageUp => app.move_notifications_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => app.move_notifications_selection(-9999),
+            KeyCode::End | KeyCode::Char('G') => app.move_notifications_selection(9999),
+            KeyCode::Enter => app.open_notification_detail(),
+            _ => {}
+        },
+        Screen::Dashboard if app.dashboard.my_commits_focused => match code {
+            KeyCode::Down | KeyCode::Char('j') => app.move_my_commits_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_my_commits_selection(-1),
+            KeyCode::PageDown => app.move_my_commits_selection(10),
+            KeyCode::PageUp => app.move_my_commits_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => app.move_my_commits_selection(-9999),
+            KeyCode::End | KeyCode::Char('G') => app.move_my_commits_selection(9999),
+            KeyCode::Enter => app.open_my_commit_detail(),
+            _ => {}
+        },
         Screen::CommitDetail => {
             if let Some(view) = app.commit_detail.as_mut() {
+                match code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        view.scroll = view.scroll.saturating_add(1)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        view.scroll = view.scroll.saturating_sub(1)
+                    }
+                    KeyCode::PageDown => view.scroll = view.scroll.saturating_add(10),
+                    KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(10),
+                    KeyCode::Home | KeyCode::Char('g') => view.scroll = 0,
+                    _ => {}
+                }
+            }
+        }
+        Screen::PrDetail => {
+            if let Some(view) = app.pr_detail.as_mut() {
                 match code {
                     KeyCode::Down | KeyCode::Char('j') => {
                         view.scroll = view.scroll.saturating_add(1)
@@ -1017,6 +1457,8 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         Screen::RepoDetail => render_repo_detail_screen(f, outer[1], app),
         Screen::CommitDetail => render_commit_detail_screen(f, outer[1], app),
         Screen::UserDetail => render_user_detail_screen(f, outer[1], app),
+        Screen::PrDetail => render_pr_detail_screen(f, outer[1], app),
+        Screen::NotificationDetail => render_notification_detail_screen(f, outer[1], app),
     }
     render_footer(f, outer[2], app);
 }
@@ -1036,8 +1478,12 @@ fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
         Line::from(org_label),
     ];
     let select = match app.screen {
-        Screen::Dashboard => 0,
-        Screen::Repo | Screen::CommitDetail => 1,
+        Screen::Dashboard | Screen::PrDetail | Screen::NotificationDetail => 0,
+        Screen::Repo => 1,
+        Screen::CommitDetail => match app.commit_detail.as_ref().map(|v| v.origin) {
+            Some(DetailOrigin::Dashboard) => 0,
+            _ => 1,
+        },
         Screen::Org | Screen::RepoDetail | Screen::UserDetail => 2,
     };
     let tabs = Tabs::new(titles)
@@ -1108,11 +1554,27 @@ fn render_dashboard_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_dashboard_review(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let title = match &app.dashboard_org {
+    let focused = app.dashboard.review_focused;
+    let base_title = match &app.dashboard_org {
         Some(o) => format!(" awaiting your review — {} ", o),
         None => " awaiting your review ".to_string(),
     };
-    let block = Block::default().borders(Borders::ALL).title(title);
+    let title = if focused {
+        format!(" awaiting your review — ↑↓ Enter, o open, Esc unfocus ")
+    } else if app.dashboard.review_prs.is_empty() {
+        base_title
+    } else {
+        format!("{}(press v to focus)", base_title.trim_end())
+    };
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
 
     if let Some(err) = &app.dashboard_org_err {
         f.render_widget(
@@ -1177,11 +1639,39 @@ fn render_dashboard_review(f: &mut ratatui::Frame, area: Rect, app: &App) {
             ]))
         })
         .collect();
-    f.render_widget(List::new(items).block(block), area);
+
+    let mut list = List::new(items).block(block);
+    if focused {
+        list = list
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+    }
+    let mut state = app.dashboard.review_list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_dashboard_my_prs(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" your open PRs ");
+    let focused = app.dashboard.my_prs_focused;
+    let title = if focused {
+        " your open PRs — ↑↓ Enter, o open, Esc unfocus ".to_string()
+    } else if app.dashboard.my_prs.is_empty() {
+        " your open PRs ".to_string()
+    } else {
+        " your open PRs (press p to focus) ".to_string()
+    };
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
     if !app.dashboard.my_prs_loaded {
         f.render_widget(
             Paragraph::new("loading…")
@@ -1232,11 +1722,38 @@ fn render_dashboard_my_prs(f: &mut ratatui::Frame, area: Rect, app: &App) {
             ]))
         })
         .collect();
-    f.render_widget(List::new(items).block(block), area);
+    let mut list = List::new(items).block(block);
+    if focused {
+        list = list
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+    }
+    let mut state = app.dashboard.my_prs_list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_dashboard_notifications(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" notifications ");
+    let focused = app.dashboard.notifications_focused;
+    let title = if focused {
+        " notifications — ↑↓ Enter, o open, Esc unfocus ".to_string()
+    } else if app.dashboard.notifications.is_empty() {
+        " notifications ".to_string()
+    } else {
+        " notifications (press n to focus) ".to_string()
+    };
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
     if !app.dashboard.notifications_loaded {
         f.render_widget(
             Paragraph::new("loading…")
@@ -1300,13 +1817,38 @@ fn render_dashboard_notifications(f: &mut ratatui::Frame, area: Rect, app: &App)
             ]))
         })
         .collect();
-    f.render_widget(List::new(items).block(block), area);
+    let mut list = List::new(items).block(block);
+    if focused {
+        list = list
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+    }
+    let mut state = app.dashboard.notifications_list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_dashboard_my_commits(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let focused = app.dashboard.my_commits_focused;
+    let title = if focused {
+        " your recent commits — ↑↓ Enter, o open, Esc unfocus ".to_string()
+    } else if app.dashboard.my_commits.is_empty() {
+        " your recent commits ".to_string()
+    } else {
+        " your recent commits (press c to focus) ".to_string()
+    };
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
     let block = Block::default()
         .borders(Borders::ALL)
-        .title(" your recent commits ");
+        .border_style(border_style)
+        .title(title);
     if !app.dashboard.my_commits_loaded {
         f.render_widget(
             Paragraph::new("loading…")
@@ -1355,7 +1897,18 @@ fn render_dashboard_my_commits(f: &mut ratatui::Frame, area: Rect, app: &App) {
             ]))
         })
         .collect();
-    f.render_widget(List::new(items).block(block), area);
+    let mut list = List::new(items).block(block);
+    if focused {
+        list = list
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+    }
+    let mut state = app.dashboard.my_commits_list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn render_dirty_files(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -2090,6 +2643,161 @@ fn render_user_list(f: &mut ratatui::Frame, area: Rect, app: &App) {
     f.render_stateful_widget(list, area, &mut state);
 }
 
+fn render_pr_detail_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let Some(view) = &app.pr_detail else {
+        return;
+    };
+
+    let block = Block::default().borders(Borders::ALL).title(" pull request ");
+    if let Some(err) = &view.error {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+    let Some(detail) = &view.detail else {
+        return;
+    };
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Length(7), Constraint::Min(0)])
+        .split(area);
+
+    render_pr_detail_header(f, rows[0], detail);
+    render_pr_detail_body(f, rows[1], detail, view.scroll);
+}
+
+fn render_pr_detail_header(f: &mut ratatui::Frame, area: Rect, detail: &PrDetail) {
+    let title = format!(" #{} — {} ", detail.number, truncate(&detail.title, 80));
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    let (state_label, state_color) = pr_state_style(&detail.state, detail.is_draft);
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("state    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(state_label.to_string(), Style::default().fg(state_color)),
+        Span::raw("   "),
+        Span::styled("author ", Style::default().fg(Color::DarkGray)),
+        Span::styled(
+            format!("@{}", detail.author),
+            Style::default().fg(Color::Cyan),
+        ),
+        Span::raw("   "),
+        Span::styled("updated ", Style::default().fg(Color::DarkGray)),
+        Span::raw(detail.updated_at.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("branch   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(detail.head_ref.clone(), Style::default().fg(Color::Yellow)),
+        Span::styled(" → ", Style::default().fg(Color::DarkGray)),
+        Span::styled(detail.base_ref.clone(), Style::default().fg(Color::Yellow)),
+        Span::raw("   "),
+        Span::styled(
+            format!("+{}", detail.additions),
+            Style::default().fg(Color::Green),
+        ),
+        Span::raw(" "),
+        Span::styled(
+            format!("-{}", detail.deletions),
+            Style::default().fg(Color::Red),
+        ),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("url      ", Style::default().fg(Color::DarkGray)),
+        Span::styled(detail.url.clone(), Style::default().fg(Color::Blue)),
+        Span::styled("   (press 'o' to open)", Style::default().fg(Color::DarkGray)),
+    ]));
+    f.render_widget(Paragraph::new(lines).block(block).wrap(Wrap { trim: false }), area);
+}
+
+fn render_pr_detail_body(f: &mut ratatui::Frame, area: Rect, detail: &PrDetail, scroll: u16) {
+    let block = Block::default().borders(Borders::ALL).title(" description ");
+    let body = if detail.body.trim().is_empty() {
+        "(no description)".to_string()
+    } else {
+        detail.body.replace("\r\n", "\n")
+    };
+    let style = if detail.body.trim().is_empty() {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    f.render_widget(
+        Paragraph::new(body)
+            .style(style)
+            .block(block)
+            .wrap(Wrap { trim: false })
+            .scroll((scroll, 0)),
+        area,
+    );
+}
+
+fn render_notification_detail_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let Some(view) = &app.notification_detail else {
+        return;
+    };
+    let n = &view.notification;
+    let title = format!(" notification — {} ", n.kind);
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    let reason_color = match n.reason.as_str() {
+        "review_requested" => Color::Yellow,
+        "mention" | "team_mention" => Color::Magenta,
+        "assign" => Color::Cyan,
+        "ci_activity" => Color::Red,
+        _ => Color::DarkGray,
+    };
+
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(vec![
+        Span::styled("reason  ", Style::default().fg(Color::DarkGray)),
+        Span::styled(n.reason.clone(), Style::default().fg(reason_color)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("type    ", Style::default().fg(Color::DarkGray)),
+        Span::raw(n.kind.clone()),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("repo    ", Style::default().fg(Color::DarkGray)),
+        Span::styled(n.repo.clone(), Style::default().fg(Color::Green)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("title   ", Style::default().fg(Color::DarkGray)),
+        Span::styled(n.title.clone(), Style::default().add_modifier(Modifier::BOLD)),
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("status  ", Style::default().fg(Color::DarkGray)),
+        if n.unread {
+            Span::styled("● unread", Style::default().fg(Color::Yellow))
+        } else {
+            Span::styled("read", Style::default().fg(Color::DarkGray))
+        },
+    ]));
+    lines.push(Line::from(vec![
+        Span::styled("updated ", Style::default().fg(Color::DarkGray)),
+        Span::raw(n.updated_at.clone()),
+    ]));
+    lines.push(Line::from(""));
+    lines.push(Line::from(vec![
+        Span::styled("url     ", Style::default().fg(Color::DarkGray)),
+        Span::styled(n.web_url.clone(), Style::default().fg(Color::Blue)),
+    ]));
+    lines.push(Line::from(Span::styled(
+        "(press 'o' to open in browser)",
+        Style::default().fg(Color::DarkGray),
+    )));
+
+    f.render_widget(
+        Paragraph::new(lines).block(block).wrap(Wrap { trim: false }),
+        area,
+    );
+}
+
 fn render_user_detail_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
     let Some(detail) = &app.user_detail else {
         return;
@@ -2412,7 +3120,44 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
     ];
 
     match app.screen {
-        Screen::Dashboard => {}
+        Screen::Dashboard => {
+            if app.dashboard.any_focused() {
+                spans.extend([
+                    Span::raw("  "),
+                    Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" select  "),
+                    Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" detail  "),
+                    Span::styled("o", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" open in browser  "),
+                    Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" unfocus"),
+                ]);
+            } else {
+                spans.extend([
+                    Span::raw("  "),
+                    Span::styled("v", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" review  "),
+                    Span::styled("p", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" my PRs  "),
+                    Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" notifications  "),
+                    Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" my commits"),
+                ]);
+            }
+        }
+        Screen::PrDetail | Screen::NotificationDetail => {
+            spans.extend([
+                Span::raw("  "),
+                Span::styled("↑↓/jk PgUp/PgDn", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" scroll  "),
+                Span::styled("o", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" open in browser  "),
+                Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                Span::raw(" back"),
+            ]);
+        }
         Screen::Repo => {
             if app.commits_focused {
                 spans.extend([

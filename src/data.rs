@@ -251,6 +251,7 @@ pub fn org_activity(org: &str, per_user_limit: usize) -> Result<Vec<UserActivity
     let pr_stdout = run_gh(&[
         "search",
         "prs",
+        "--archived=false",
         "--owner",
         org,
         "--sort",
@@ -267,6 +268,7 @@ pub fn org_activity(org: &str, per_user_limit: usize) -> Result<Vec<UserActivity
     let issue_stdout = run_gh(&[
         "search",
         "issues",
+        "--archived=false",
         "--owner",
         org,
         "--sort",
@@ -588,6 +590,87 @@ pub fn commit_detail(sha: &str) -> Result<CommitDetail> {
     })
 }
 
+#[derive(Debug, Deserialize)]
+struct RawApiCommitFull {
+    sha: String,
+    commit: RawApiCommitFullInner,
+    #[serde(default)]
+    files: Vec<RawApiCommitFile>,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawApiCommitFullInner {
+    author: RawCommitAuthor,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawApiCommitFile {
+    filename: String,
+    additions: u64,
+    deletions: u64,
+    status: String,
+}
+
+pub fn org_commit_detail(owner: &str, repo: &str, sha: &str) -> Result<CommitDetail> {
+    let stdout = run_gh(&[
+        "api",
+        &format!("/repos/{}/{}/commits/{}", owner, repo, sha),
+    ])
+    .context("gh api commit detail failed")?;
+    let raw: RawApiCommitFull =
+        serde_json::from_slice(&stdout).context("failed to parse commit detail JSON")?;
+
+    let mut lines = raw.commit.message.lines();
+    let subject = lines.next().unwrap_or("").to_string();
+    let body: String = lines
+        .skip_while(|l| l.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim_end()
+        .to_string();
+
+    let mut total_add = 0u64;
+    let mut total_del = 0u64;
+    let mut stat_lines: Vec<String> = raw
+        .files
+        .iter()
+        .map(|f| {
+            total_add += f.additions;
+            total_del += f.deletions;
+            let status = match f.status.as_str() {
+                "added" => "+",
+                "removed" => "-",
+                "renamed" => "R",
+                "modified" => "M",
+                other => other,
+            };
+            format!(
+                " {} {}  +{} -{}",
+                status, f.filename, f.additions, f.deletions
+            )
+        })
+        .collect();
+    if !raw.files.is_empty() {
+        stat_lines.push(format!(
+            " {} files changed, {} insertions(+), {} deletions(-)",
+            raw.files.len(),
+            total_add,
+            total_del
+        ));
+    }
+
+    Ok(CommitDetail {
+        sha: raw.sha,
+        author: raw.commit.author.name,
+        email: String::new(),
+        date: humanize_iso(&raw.commit.author.date),
+        subject,
+        body,
+        stat_lines,
+    })
+}
+
 #[derive(Debug, Clone)]
 pub struct DirtyFile {
     pub status: String,
@@ -622,6 +705,7 @@ pub fn review_requested_prs(org: &str, limit: usize) -> Result<Vec<ReviewRequest
     let stdout = run_gh(&[
         "search",
         "prs",
+        "--archived=false",
         "--owner",
         org,
         "--review-requested",
@@ -688,6 +772,7 @@ pub fn dashboard_open_prs(limit: usize) -> Result<Vec<UserPr>> {
     let stdout = run_gh(&[
         "search",
         "prs",
+        "--archived=false",
         "--author",
         "@me",
         "--state",
@@ -724,6 +809,7 @@ pub struct Notification {
     pub kind: String,
     pub unread: bool,
     pub updated_at: String,
+    pub web_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -740,6 +826,8 @@ struct RawNotificationSubject {
     title: String,
     #[serde(rename = "type")]
     kind: String,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -757,15 +845,39 @@ pub fn notifications(limit: usize) -> Result<Vec<Notification>> {
         serde_json::from_slice(&stdout).context("failed to parse notifications JSON")?;
     Ok(raw
         .into_iter()
-        .map(|n| Notification {
-            reason: n.reason,
-            title: n.subject.title,
-            repo: n.repository.full_name,
-            kind: n.subject.kind,
-            unread: n.unread,
-            updated_at: humanize_iso(&n.updated_at),
+        .map(|n| {
+            let web_url = notification_web_url(
+                n.subject.url.as_deref(),
+                &n.subject.kind,
+                &n.repository.full_name,
+            );
+            Notification {
+                reason: n.reason,
+                title: n.subject.title,
+                repo: n.repository.full_name,
+                kind: n.subject.kind,
+                unread: n.unread,
+                updated_at: humanize_iso(&n.updated_at),
+                web_url,
+            }
         })
         .collect())
+}
+
+fn notification_web_url(api_url: Option<&str>, kind: &str, repo: &str) -> String {
+    // Subject URLs come back as `https://api.github.com/repos/X/Y/<resource>/<id>`
+    // Convert to the user-facing github.com equivalent.
+    if let Some(api) = api_url {
+        if let Some(rest) = api.strip_prefix("https://api.github.com/repos/") {
+            let converted = rest
+                .replacen("/pulls/", "/pull/", 1)
+                .replacen("/commits/", "/commit/", 1);
+            return format!("https://github.com/{}", converted);
+        }
+    }
+    // Fallback: just the repo page if we couldn't parse the subject URL.
+    let _ = kind;
+    format!("https://github.com/{}", repo)
 }
 
 pub fn my_recent_commits(login: &str, limit: usize) -> Result<Vec<UserCommit>> {
@@ -799,6 +911,98 @@ pub fn my_recent_commits(login: &str, limit: usize) -> Result<Vec<UserCommit>> {
             }
         })
         .collect())
+}
+
+#[derive(Debug, Clone)]
+pub struct PrDetail {
+    pub number: u64,
+    pub title: String,
+    pub body: String,
+    pub url: String,
+    pub author: String,
+    pub state: String,
+    pub is_draft: bool,
+    pub head_ref: String,
+    pub base_ref: String,
+    pub additions: u64,
+    pub deletions: u64,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct RawPrDetail {
+    number: u64,
+    title: String,
+    body: String,
+    url: String,
+    author: Option<SearchAuthor>,
+    state: String,
+    #[serde(rename = "isDraft", default)]
+    is_draft: bool,
+    #[serde(rename = "headRefName")]
+    head_ref_name: String,
+    #[serde(rename = "baseRefName")]
+    base_ref_name: String,
+    #[serde(default)]
+    additions: u64,
+    #[serde(default)]
+    deletions: u64,
+    #[serde(rename = "updatedAt")]
+    updated_at: String,
+}
+
+pub fn pr_detail(owner: &str, repo: &str, number: u64) -> Result<PrDetail> {
+    let repo_arg = format!("{}/{}", owner, repo);
+    let num_arg = number.to_string();
+    let stdout = run_gh(&[
+        "pr",
+        "view",
+        &num_arg,
+        "--repo",
+        &repo_arg,
+        "--json",
+        "number,title,body,url,author,state,isDraft,headRefName,baseRefName,additions,deletions,updatedAt",
+    ])
+    .context("gh pr view failed")?;
+    let raw: RawPrDetail =
+        serde_json::from_slice(&stdout).context("failed to parse PR detail JSON")?;
+    Ok(PrDetail {
+        number: raw.number,
+        title: raw.title,
+        body: raw.body,
+        url: raw.url,
+        author: raw.author.map(|a| a.login).unwrap_or_default(),
+        state: raw.state,
+        is_draft: raw.is_draft,
+        head_ref: raw.head_ref_name,
+        base_ref: raw.base_ref_name,
+        additions: raw.additions,
+        deletions: raw.deletions,
+        updated_at: humanize_iso(&raw.updated_at),
+    })
+}
+
+pub fn open_in_browser(url: &str) -> Result<()> {
+    let opener = if cfg!(target_os = "macos") {
+        "open"
+    } else if cfg!(target_os = "windows") {
+        "cmd"
+    } else {
+        "xdg-open"
+    };
+    let mut cmd = Command::new(opener);
+    if cfg!(target_os = "windows") {
+        cmd.args(["/C", "start", "", url]);
+    } else {
+        cmd.arg(url);
+    }
+    let status = cmd
+        .status()
+        .with_context(|| format!("failed to launch {} for {}", opener, url))?;
+    if !status.success() {
+        bail!("{} exited with status {}", opener, status);
+    }
+    Ok(())
 }
 
 pub fn split_full_name(full: &str) -> Option<(String, String)> {
@@ -950,6 +1154,7 @@ pub fn user_submitted_prs(org: &str, user: &str, limit: usize) -> Result<Vec<Use
     fetch_user_prs(&[
         "search",
         "prs",
+        "--archived=false",
         "--owner",
         org,
         "--author",
@@ -967,6 +1172,7 @@ pub fn user_reviewed_prs(org: &str, user: &str, limit: usize) -> Result<Vec<User
     fetch_user_prs(&[
         "search",
         "prs",
+        "--archived=false",
         "--owner",
         org,
         "--reviewed-by",
