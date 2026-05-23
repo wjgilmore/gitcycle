@@ -75,13 +75,25 @@ You need three things on your machine:
 
 ## Installation
 
-From the repository root:
+### From crates.io (recommended)
 
 ```sh
+cargo install gitcycle
+```
+
+This downloads the latest release from [crates.io/crates/gitcycle](https://crates.io/crates/gitcycle), builds it in release mode, and drops the binary at `~/.cargo/bin/gitcycle`.
+
+### From source
+
+If you want to track `master` or hack on the code:
+
+```sh
+git clone https://github.com/wjgilmore/gitcycle.git
+cd gitcycle
 cargo install --path .
 ```
 
-This builds in release mode and installs the binary to `~/.cargo/bin/gitcycle`.
+### PATH setup
 
 If `~/.cargo/bin` isn't on your `PATH`, add it to your shell config:
 
