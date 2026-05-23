@@ -13,7 +13,6 @@ pub struct RepoSummary {
     pub upstream: Option<String>,
     pub ahead: u32,
     pub behind: u32,
-    pub dirty_files: u32,
     pub last_fetch: Option<String>,
 }
 
@@ -80,10 +79,6 @@ pub fn repo_summary() -> Result<RepoSummary> {
         (0, 0)
     };
 
-    let dirty_files = run_git(&["status", "--porcelain"])
-        .map(|s| s.lines().filter(|l| !l.is_empty()).count() as u32)
-        .unwrap_or(0);
-
     let last_fetch = run_git_opt(&["log", "-1", "--format=%cr", "FETCH_HEAD"]);
 
     Ok(RepoSummary {
@@ -93,7 +88,6 @@ pub fn repo_summary() -> Result<RepoSummary> {
         upstream,
         ahead,
         behind,
-        dirty_files,
         last_fetch,
     })
 }
@@ -358,7 +352,6 @@ pub struct RepoInfo {
     pub default_branch: Option<String>,
     pub primary_language: Option<String>,
     pub stargazer_count: u64,
-    pub is_archived: bool,
     pub is_private: bool,
 }
 
@@ -377,8 +370,6 @@ struct RawRepoListItem {
     primary_language: Option<RawLanguage>,
     #[serde(rename = "stargazerCount", default)]
     stargazer_count: u64,
-    #[serde(rename = "isArchived", default)]
-    is_archived: bool,
     #[serde(rename = "isPrivate", default)]
     is_private: bool,
 }
@@ -402,7 +393,7 @@ pub fn org_repos(org: &str) -> Result<Vec<RepoInfo>> {
         "500",
         "--no-archived",
         "--json",
-        "name,nameWithOwner,description,pushedAt,defaultBranchRef,primaryLanguage,stargazerCount,isArchived,isPrivate",
+        "name,nameWithOwner,description,pushedAt,defaultBranchRef,primaryLanguage,stargazerCount,isPrivate",
     ])
     .context("gh repo list failed")?;
 
@@ -419,7 +410,6 @@ pub fn org_repos(org: &str) -> Result<Vec<RepoInfo>> {
             default_branch: r.default_branch_ref.map(|b| b.name),
             primary_language: r.primary_language.map(|l| l.name),
             stargazer_count: r.stargazer_count,
-            is_archived: r.is_archived,
             is_private: r.is_private,
         })
         .collect();

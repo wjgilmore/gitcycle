@@ -6,6 +6,10 @@ authors = ["Jason Gilmore <wj@wjgilmore.com>"]
 license = "MIT"
 description = "Terminal UI for exploring the current git repository and its GitHub organization."
 readme = "README.md"
+repository = "https://github.com/wjgilmore/gitcycle"
+homepage = "https://github.com/wjgilmore/gitcycle"
+keywords = ["tui", "git", "github", "ratatui", "cli"]
+categories = ["command-line-utilities"]
 
 [dependencies]
 ratatui = "0.29"
