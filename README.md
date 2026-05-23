@@ -142,8 +142,11 @@ gitcycle
 | Key | Action |
 | --- | --- |
 | `c` | focus the recent-commits panel |
+| `d` | focus the dirty-files panel |
 | `↑`/`↓`, `j`/`k`, `PgUp`/`PgDn`, `g`/`G` | move selection within the focused panel |
-| `Enter` | open commit detail |
+| `Enter` (commits) | open commit detail |
+| `Enter` (dirty files) | view diff for the selected file (replaces commits + PRs on the right) |
+| `Esc` (in diff view) | close diff and return to commits + PRs |
 
 **Org tab**
 | Key | Action |

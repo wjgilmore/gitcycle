@@ -681,6 +681,35 @@ pub fn dirty_file_list() -> Result<Vec<DirtyFile>> {
     Ok(files)
 }
 
+pub fn file_diff(path: &str, status: &str) -> Result<Vec<String>> {
+    let trimmed = status.trim();
+    let output = if trimmed == "??" {
+        // Untracked: show full file as a new-add diff.
+        Command::new("git")
+            .args(["diff", "--no-index", "--no-color", "/dev/null", path])
+            .output()
+            .with_context(|| format!("git diff --no-index {} failed", path))?
+    } else {
+        // Tracked: show staged + unstaged changes against HEAD.
+        Command::new("git")
+            .args(["diff", "HEAD", "--no-color", "--", path])
+            .output()
+            .with_context(|| format!("git diff HEAD -- {} failed", path))?
+    };
+
+    // `git diff --no-index` returns exit code 1 when files differ. That's success
+    // for our purposes; only treat non-zero with non-empty stderr as failure.
+    if !output.status.success() && output.stdout.is_empty() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !stderr.trim().is_empty() {
+            bail!("git diff failed: {}", stderr.trim());
+        }
+    }
+
+    let body = String::from_utf8_lossy(&output.stdout);
+    Ok(body.lines().map(|l| l.to_string()).collect())
+}
+
 #[derive(Debug, Clone)]
 pub struct ReviewRequestedPr {
     pub number: u64,

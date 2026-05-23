@@ -145,6 +145,9 @@ struct App {
     prs_err: Option<String>,
     dirty_files: Vec<DirtyFile>,
     dirty_files_err: Option<String>,
+    dirty_files_focused: bool,
+    dirty_files_list_state: ListState,
+    dirty_diff: Option<DirtyDiffView>,
     dashboard: DashboardState,
     org: OrgState,
     org_scroll: u16,
@@ -234,6 +237,14 @@ struct CommitDetailView {
 
 struct NotificationDetailView {
     notification: Notification,
+}
+
+struct DirtyDiffView {
+    path: String,
+    status: String,
+    lines: Vec<String>,
+    error: Option<String>,
+    scroll: u16,
 }
 
 enum BgMessage {
@@ -390,6 +401,9 @@ impl App {
             prs_err,
             dirty_files,
             dirty_files_err,
+            dirty_files_focused: false,
+            dirty_files_list_state: ListState::default(),
+            dirty_diff: None,
             dashboard: DashboardState::new(),
             org: OrgState {
                 name,
@@ -497,6 +511,61 @@ impl App {
                 Err(_) => break,
             }
         }
+    }
+
+    fn focus_dirty_files(&mut self) {
+        if self.dirty_files.is_empty() {
+            return;
+        }
+        self.commits_focused = false;
+        self.dirty_files_focused = true;
+        if self.dirty_files_list_state.selected().is_none() {
+            self.dirty_files_list_state.select(Some(0));
+        }
+    }
+
+    fn unfocus_dirty_files(&mut self) {
+        self.dirty_files_focused = false;
+    }
+
+    fn move_dirty_file_selection(&mut self, delta: i32) {
+        clamp_select(
+            &mut self.dirty_files_list_state,
+            self.dirty_files.len(),
+            delta,
+        );
+    }
+
+    fn open_dirty_file_diff(&mut self) {
+        let Some(idx) = self.dirty_files_list_state.selected() else {
+            return;
+        };
+        let Some(file) = self.dirty_files.get(idx) else {
+            return;
+        };
+        let path = file.path.clone();
+        let status = file.status.clone();
+        let view = match data::file_diff(&path, &status) {
+            Ok(lines) => DirtyDiffView {
+                path,
+                status,
+                lines,
+                error: None,
+                scroll: 0,
+            },
+            Err(e) => DirtyDiffView {
+                path,
+                status,
+                lines: Vec::new(),
+                error: Some(format!("{:#}", e)),
+                scroll: 0,
+            },
+        };
+        self.dirty_diff = Some(view);
+    }
+
+    fn close_dirty_file_diff(&mut self) {
+        self.dirty_diff = None;
     }
 
     fn focus_commits(&mut self) {
@@ -1161,6 +1230,8 @@ fn run_app<B: ratatui::backend::Backend>(
                         Screen::UserDetail => app.close_user_detail(),
                         Screen::PrDetail => app.close_pr_detail(),
                         Screen::NotificationDetail => app.close_notification_detail(),
+                        Screen::Repo if app.dirty_diff.is_some() => app.close_dirty_file_diff(),
+                        Screen::Repo if app.dirty_files_focused => app.unfocus_dirty_files(),
                         Screen::Repo if app.commits_focused => app.unfocus_commits(),
                         Screen::Dashboard if app.dashboard.any_focused() => {
                             app.dashboard.unfocus_all()
@@ -1175,6 +1246,8 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.pr_detail = None;
                         app.notification_detail = None;
                         app.commits_focused = false;
+                        app.dirty_files_focused = false;
+                        app.dirty_diff = None;
                         app.screen = Screen::Dashboard;
                     }
                     KeyCode::Char('2') => {
@@ -1193,6 +1266,8 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.pr_detail = None;
                         app.notification_detail = None;
                         app.commits_focused = false;
+                        app.dirty_files_focused = false;
+                        app.dirty_diff = None;
                         app.dashboard.unfocus_all();
                         app.screen = Screen::Org;
                     }
@@ -1203,6 +1278,8 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.pr_detail = None;
                         app.notification_detail = None;
                         app.commits_focused = false;
+                        app.dirty_files_focused = false;
+                        app.dirty_diff = None;
                         app.dashboard.unfocus_all();
                         app.screen = match app.screen {
                             Screen::Dashboard => Screen::Repo,
@@ -1222,6 +1299,8 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.pr_detail = None;
                         app.notification_detail = None;
                         app.commits_focused = false;
+                        app.dirty_files_focused = false;
+                        app.dirty_diff = None;
                         app.dashboard.unfocus_all();
                         app.screen = match app.screen {
                             Screen::Dashboard => Screen::Org,
@@ -1251,6 +1330,7 @@ fn run_app<B: ratatui::backend::Backend>(
                         app.switch_subview(next);
                     }
                     KeyCode::Char('c') if app.screen == Screen::Repo => app.focus_commits(),
+                    KeyCode::Char('d') if app.screen == Screen::Repo => app.focus_dirty_files(),
                     KeyCode::Char('v') if app.screen == Screen::Dashboard => app.focus_review(),
                     KeyCode::Char('p') if app.screen == Screen::Dashboard => app.focus_my_prs(),
                     KeyCode::Char('n') if app.screen == Screen::Dashboard => {
@@ -1287,6 +1367,32 @@ fn run_app<B: ratatui::backend::Backend>(
 
 fn handle_screen_key(app: &mut App, code: KeyCode) {
     match app.screen {
+        Screen::Repo if app.dirty_diff.is_some() => {
+            if let Some(view) = app.dirty_diff.as_mut() {
+                match code {
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        view.scroll = view.scroll.saturating_add(1)
+                    }
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        view.scroll = view.scroll.saturating_sub(1)
+                    }
+                    KeyCode::PageDown => view.scroll = view.scroll.saturating_add(10),
+                    KeyCode::PageUp => view.scroll = view.scroll.saturating_sub(10),
+                    KeyCode::Home | KeyCode::Char('g') => view.scroll = 0,
+                    _ => {}
+                }
+            }
+        }
+        Screen::Repo if app.dirty_files_focused => match code {
+            KeyCode::Down | KeyCode::Char('j') => app.move_dirty_file_selection(1),
+            KeyCode::Up | KeyCode::Char('k') => app.move_dirty_file_selection(-1),
+            KeyCode::PageDown => app.move_dirty_file_selection(10),
+            KeyCode::PageUp => app.move_dirty_file_selection(-10),
+            KeyCode::Home | KeyCode::Char('g') => app.move_dirty_file_selection(-9999),
+            KeyCode::End | KeyCode::Char('G') => app.move_dirty_file_selection(9999),
+            KeyCode::Enter => app.open_dirty_file_diff(),
+            _ => {}
+        },
         Screen::Repo if app.commits_focused => match code {
             KeyCode::Down | KeyCode::Char('j') => app.move_commit_selection(1),
             KeyCode::Up | KeyCode::Char('k') => app.move_commit_selection(-1),
@@ -1521,15 +1627,76 @@ fn render_repo_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
         .constraints([Constraint::Length(8), Constraint::Min(0)])
         .split(cols[0]);
 
-    let right = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-        .split(cols[1]);
-
     render_summary(f, left[0], app);
     render_dirty_files(f, left[1], app);
-    render_commits(f, right[0], app);
-    render_prs(f, right[1], app);
+
+    if app.dirty_diff.is_some() {
+        render_dirty_diff(f, cols[1], app);
+    } else {
+        let right = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+            .split(cols[1]);
+        render_commits(f, right[0], app);
+        render_prs(f, right[1], app);
+    }
+}
+
+fn render_dirty_diff(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let Some(view) = &app.dirty_diff else {
+        return;
+    };
+    let title = format!(" diff — {} ({}) ", view.path, view.status.trim());
+    let block = Block::default().borders(Borders::ALL).title(title);
+
+    if let Some(err) = &view.error {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            area,
+        );
+        return;
+    }
+
+    if view.lines.is_empty() {
+        f.render_widget(
+            Paragraph::new("(no changes shown — file may be staged but identical to HEAD)")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block),
+            area,
+        );
+        return;
+    }
+
+    let lines: Vec<Line> = view.lines.iter().map(|l| diff_line(l)).collect();
+    f.render_widget(
+        Paragraph::new(lines).block(block).scroll((view.scroll, 0)),
+        area,
+    );
+}
+
+fn diff_line(s: &str) -> Line<'static> {
+    let owned = s.to_string();
+    let style = if s.starts_with("+++") || s.starts_with("---") {
+        Style::default()
+            .fg(Color::Yellow)
+            .add_modifier(Modifier::BOLD)
+    } else if s.starts_with("@@") {
+        Style::default()
+            .fg(Color::Cyan)
+            .add_modifier(Modifier::BOLD)
+    } else if s.starts_with('+') {
+        Style::default().fg(Color::Green)
+    } else if s.starts_with('-') {
+        Style::default().fg(Color::Red)
+    } else if s.starts_with("diff ") || s.starts_with("index ") {
+        Style::default().fg(Color::DarkGray)
+    } else {
+        Style::default()
+    };
+    Line::from(Span::styled(owned, style))
 }
 
 fn render_dashboard_screen(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -1912,7 +2079,24 @@ fn render_dashboard_my_commits(f: &mut ratatui::Frame, area: Rect, app: &App) {
 }
 
 fn render_dirty_files(f: &mut ratatui::Frame, area: Rect, app: &App) {
-    let block = Block::default().borders(Borders::ALL).title(" dirty files ");
+    let focused = app.dirty_files_focused;
+    let title = if focused {
+        " dirty files — ↑↓ Enter diff, Esc unfocus ".to_string()
+    } else if app.dirty_files.is_empty() {
+        " dirty files ".to_string()
+    } else {
+        " dirty files (press d to focus) ".to_string()
+    };
+    let border_style = if focused {
+        Style::default().fg(Color::Yellow)
+    } else {
+        Style::default()
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(border_style)
+        .title(title);
+
     if let Some(err) = &app.dirty_files_err {
         f.render_widget(
             Paragraph::new(format!("error: {}", err))
@@ -1945,7 +2129,18 @@ fn render_dirty_files(f: &mut ratatui::Frame, area: Rect, app: &App) {
             ]))
         })
         .collect();
-    f.render_widget(List::new(items).block(block), area);
+    let mut list = List::new(items).block(block);
+    if focused {
+        list = list
+            .highlight_style(
+                Style::default()
+                    .bg(Color::DarkGray)
+                    .add_modifier(Modifier::BOLD),
+            )
+            .highlight_symbol("▶ ");
+    }
+    let mut state = app.dirty_files_list_state.clone();
+    f.render_stateful_widget(list, area, &mut state);
 }
 
 fn status_color(s: &str) -> Color {
@@ -3159,7 +3354,25 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
             ]);
         }
         Screen::Repo => {
-            if app.commits_focused {
+            if app.dirty_diff.is_some() {
+                spans.extend([
+                    Span::raw("  "),
+                    Span::styled("↑↓/jk PgUp/PgDn", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" scroll diff  "),
+                    Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" close diff"),
+                ]);
+            } else if app.dirty_files_focused {
+                spans.extend([
+                    Span::raw("  "),
+                    Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" select  "),
+                    Span::styled("Enter", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" view diff  "),
+                    Span::styled("Esc", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" unfocus"),
+                ]);
+            } else if app.commits_focused {
                 spans.extend([
                     Span::raw("  "),
                     Span::styled("↑↓/jk", Style::default().add_modifier(Modifier::BOLD)),
@@ -3173,7 +3386,9 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
                 spans.extend([
                     Span::raw("  "),
                     Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" focus commits"),
+                    Span::raw(" focus commits  "),
+                    Span::styled("d", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" focus dirty files"),
                 ]);
             }
         }
