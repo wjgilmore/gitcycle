@@ -176,6 +176,10 @@ gitcycle
 - **`could not resolve to a Repository`** — the active `gh` account doesn't have access. Run `gh auth status` to check, and `gh auth switch` if you have multiple accounts.
 - **Org tab shows "loading…" forever** — the background fetch failed silently. Press `r` to retry, or run the underlying command manually to see the error: `gh search prs --owner <ORG>` / `gh repo list <ORG>`.
 
+## Releases
+
+See [CHANGELOG.md](CHANGELOG.md) for the version history. Released versions are tagged in git as `vX.Y.Z` and published to [crates.io/crates/gitcycle](https://crates.io/crates/gitcycle).
+
 ## License
 
 MIT — see [LICENSE.md](LICENSE.md).
