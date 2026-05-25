@@ -12,7 +12,7 @@ use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
     style::{Color, Modifier, Style},
     text::{Line, Span},
-    widgets::{Block, Borders, List, ListItem, ListState, Paragraph, Tabs, Wrap},
+    widgets::{Block, Borders, Clear, List, ListItem, ListState, Paragraph, Tabs, Wrap},
 };
 use std::{
     io,
@@ -22,8 +22,8 @@ use std::{
 };
 
 use data::{
-    Commit, CommitDetail, Contributor, DirtyFile, Notification, OrgMember, PrDetail, PullRequest,
-    RepoInfo, RepoSummary, ReviewRequestedPr, UserActivity, UserCommit, UserPr,
+    Commit, CommitDetail, Contributor, DirtyFile, GhAccount, Notification, OrgMember, PrDetail,
+    PullRequest, RepoInfo, RepoSummary, ReviewRequestedPr, UserActivity, UserCommit, UserPr,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -155,6 +155,7 @@ struct App {
     user_detail: Option<UserDetailState>,
     pr_detail: Option<PrDetailView>,
     notification_detail: Option<NotificationDetailView>,
+    account_switcher: Option<AccountSwitcherState>,
     bg_rx: Option<Receiver<BgMessage>>,
 }
 
@@ -245,6 +246,12 @@ struct DirtyDiffView {
     lines: Vec<String>,
     error: Option<String>,
     scroll: u16,
+}
+
+struct AccountSwitcherState {
+    accounts: Vec<GhAccount>,
+    list_state: ListState,
+    error: Option<String>,
 }
 
 enum BgMessage {
@@ -420,6 +427,7 @@ impl App {
             user_detail: None,
             pr_detail: None,
             notification_detail: None,
+            account_switcher: None,
             bg_rx,
         }
     }
@@ -509,6 +517,67 @@ impl App {
                     self.dashboard.my_commits_err = Some(e);
                 }
                 Err(_) => break,
+            }
+        }
+    }
+
+    fn open_account_switcher(&mut self) {
+        let (accounts, error) = match data::list_gh_accounts() {
+            Ok(a) => (a, None),
+            Err(e) => (Vec::new(), Some(format!("{:#}", e))),
+        };
+        let mut list_state = ListState::default();
+        // Default selection to the currently-active account.
+        let active_idx = accounts.iter().position(|a| a.active).unwrap_or(0);
+        if !accounts.is_empty() {
+            list_state.select(Some(active_idx));
+        }
+        self.account_switcher = Some(AccountSwitcherState {
+            accounts,
+            list_state,
+            error,
+        });
+    }
+
+    fn close_account_switcher(&mut self) {
+        self.account_switcher = None;
+    }
+
+    fn move_account_selection(&mut self, delta: i32) {
+        let Some(s) = self.account_switcher.as_mut() else {
+            return;
+        };
+        clamp_select(&mut s.list_state, s.accounts.len(), delta);
+    }
+
+    fn apply_account_switch(&mut self) {
+        let Some(s) = self.account_switcher.as_ref() else {
+            return;
+        };
+        let Some(idx) = s.list_state.selected() else {
+            return;
+        };
+        let Some(account) = s.accounts.get(idx) else {
+            return;
+        };
+
+        if account.active {
+            // Selected the already-active account; just close the modal.
+            self.account_switcher = None;
+            return;
+        }
+
+        let login = account.login.clone();
+        let host = account.host.clone();
+        match data::switch_gh_account(&login, &host) {
+            Ok(()) => {
+                self.account_switcher = None;
+                self.reload();
+            }
+            Err(e) => {
+                if let Some(s) = self.account_switcher.as_mut() {
+                    s.error = Some(format!("{:#}", e));
+                }
             }
         }
     }
@@ -1170,6 +1239,18 @@ fn run_app<B: ratatui::backend::Backend>(
                     continue;
                 }
 
+                // Account switcher modal swallows keys when open.
+                if app.account_switcher.is_some() {
+                    match key.code {
+                        KeyCode::Esc => app.close_account_switcher(),
+                        KeyCode::Down | KeyCode::Char('j') => app.move_account_selection(1),
+                        KeyCode::Up | KeyCode::Char('k') => app.move_account_selection(-1),
+                        KeyCode::Enter => app.apply_account_switch(),
+                        _ => {}
+                    }
+                    continue;
+                }
+
                 // Filter-input mode swallows most keys.
                 if app.screen == Screen::Org
                     && app.org.subview == OrgSubview::Repos
@@ -1331,6 +1412,9 @@ fn run_app<B: ratatui::backend::Backend>(
                     }
                     KeyCode::Char('c') if app.screen == Screen::Repo => app.focus_commits(),
                     KeyCode::Char('d') if app.screen == Screen::Repo => app.focus_dirty_files(),
+                    KeyCode::Char('s') if app.screen == Screen::Dashboard => {
+                        app.open_account_switcher()
+                    }
                     KeyCode::Char('v') if app.screen == Screen::Dashboard => app.focus_review(),
                     KeyCode::Char('p') if app.screen == Screen::Dashboard => app.focus_my_prs(),
                     KeyCode::Char('n') if app.screen == Screen::Dashboard => {
@@ -1567,6 +1651,108 @@ fn ui(f: &mut ratatui::Frame, app: &App) {
         Screen::NotificationDetail => render_notification_detail_screen(f, outer[1], app),
     }
     render_footer(f, outer[2], app);
+
+    // Modal overlay (drawn last so it sits on top of everything).
+    if app.account_switcher.is_some() {
+        render_account_switcher_modal(f, f.area(), app);
+    }
+}
+
+fn centered_rect(width: u16, height: u16, area: Rect) -> Rect {
+    let h = height.min(area.height);
+    let w = width.min(area.width);
+    let x = area.x + (area.width.saturating_sub(w)) / 2;
+    let y = area.y + (area.height.saturating_sub(h)) / 2;
+    Rect::new(x, y, w, h)
+}
+
+fn render_account_switcher_modal(f: &mut ratatui::Frame, area: Rect, app: &App) {
+    let Some(state) = app.account_switcher.as_ref() else {
+        return;
+    };
+
+    // Sized to fit the longest login plus a comfortable margin.
+    let max_login = state
+        .accounts
+        .iter()
+        .map(|a| a.login.chars().count())
+        .max()
+        .unwrap_or(20);
+    let width = (max_login as u16 + 20).clamp(40, 70);
+    let height = (state.accounts.len() as u16 + 6).clamp(8, 16);
+    let modal = centered_rect(width, height, area);
+
+    // Clear underlying cells so the modal stands out.
+    f.render_widget(Clear, modal);
+
+    let title = " switch GitHub account — ↑↓ select, Enter, Esc cancel ";
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Yellow))
+        .title(title);
+
+    if let Some(err) = &state.error {
+        f.render_widget(
+            Paragraph::new(format!("error: {}", err))
+                .style(Style::default().fg(Color::Red))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            modal,
+        );
+        return;
+    }
+
+    if state.accounts.is_empty() {
+        f.render_widget(
+            Paragraph::new("no gh accounts found.\n\nrun `gh auth login` in another terminal first.")
+                .style(Style::default().fg(Color::DarkGray))
+                .block(block)
+                .wrap(Wrap { trim: false }),
+            modal,
+        );
+        return;
+    }
+
+    let items: Vec<ListItem> = state
+        .accounts
+        .iter()
+        .map(|a| {
+            let marker = if a.active {
+                Span::styled("● ", Style::default().fg(Color::Green))
+            } else {
+                Span::raw("  ")
+            };
+            let host = if a.host == "github.com" {
+                String::new()
+            } else {
+                format!("  [{}]", a.host)
+            };
+            let login_style = if a.active {
+                Style::default()
+                    .fg(Color::Green)
+                    .add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(Color::Cyan)
+            };
+            ListItem::new(Line::from(vec![
+                marker,
+                Span::styled(format!("@{}", a.login), login_style),
+                Span::styled(host, Style::default().fg(Color::DarkGray)),
+            ]))
+        })
+        .collect();
+
+    let list = List::new(items)
+        .block(block)
+        .highlight_style(
+            Style::default()
+                .bg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD),
+        )
+        .highlight_symbol("▶ ");
+
+    let mut s = state.list_state.clone();
+    f.render_stateful_widget(list, modal, &mut s);
 }
 
 fn render_tabs(f: &mut ratatui::Frame, area: Rect, app: &App) {
@@ -3338,7 +3524,9 @@ fn render_footer(f: &mut ratatui::Frame, area: Rect, app: &App) {
                     Span::styled("n", Style::default().add_modifier(Modifier::BOLD)),
                     Span::raw(" notifications  "),
                     Span::styled("c", Style::default().add_modifier(Modifier::BOLD)),
-                    Span::raw(" my commits"),
+                    Span::raw(" my commits  "),
+                    Span::styled("s", Style::default().add_modifier(Modifier::BOLD)),
+                    Span::raw(" switch account"),
                 ]);
             }
         }

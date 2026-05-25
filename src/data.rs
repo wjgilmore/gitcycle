@@ -754,6 +754,67 @@ pub fn review_requested_prs(org: &str, limit: usize) -> Result<Vec<ReviewRequest
         .collect())
 }
 
+#[derive(Debug, Clone)]
+pub struct GhAccount {
+    pub login: String,
+    pub host: String,
+    pub active: bool,
+}
+
+pub fn list_gh_accounts() -> Result<Vec<GhAccount>> {
+    // `gh auth status` writes to stderr on success, stdout when there are no creds.
+    let output = Command::new("gh")
+        .args(["auth", "status"])
+        .output()
+        .context("failed to execute gh auth status")?;
+    // gh exits non-zero only when there are no logged-in accounts; surface that as empty.
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    let mut accounts: Vec<GhAccount> = Vec::new();
+    for line in combined.lines() {
+        let trimmed = line.trim_start();
+        // Match: "✓ Logged in to <host> account <login> (<source>)"
+        if let Some(rest) = trimmed.strip_prefix("✓ Logged in to ") {
+            // rest = "<host> account <login> (<source>)"
+            if let Some((host, after)) = rest.split_once(" account ") {
+                let login = after
+                    .split_whitespace()
+                    .next()
+                    .unwrap_or("")
+                    .to_string();
+                if !login.is_empty() {
+                    accounts.push(GhAccount {
+                        login,
+                        host: host.to_string(),
+                        active: false,
+                    });
+                }
+            }
+        } else if let Some(rest) = trimmed.strip_prefix("- Active account: ") {
+            if let Some(last) = accounts.last_mut() {
+                last.active = rest.trim() == "true";
+            }
+        }
+    }
+    Ok(accounts)
+}
+
+pub fn switch_gh_account(login: &str, host: &str) -> Result<()> {
+    let output = Command::new("gh")
+        .args(["auth", "switch", "--user", login, "--hostname", host])
+        .output()
+        .context("failed to execute gh auth switch")?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        bail!("gh auth switch failed: {}", stderr.trim());
+    }
+    Ok(())
+}
+
 pub fn authed_user_login() -> Result<String> {
     let stdout = run_gh(&["api", "user", "--jq", ".login"]).context("gh api user failed")?;
     let login = String::from_utf8_lossy(&stdout).trim().to_string();

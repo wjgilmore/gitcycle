@@ -134,6 +134,7 @@ gitcycle
 | `p` | focus the "your open PRs" panel |
 | `n` | focus the "notifications" panel |
 | `c` | focus the "your recent commits" panel |
+| `s` | open the GitHub-account switcher (centered modal listing your `gh auth` accounts; `↑`/`↓` to pick, `Enter` to switch + reload, `Esc` to cancel) |
 | `↑`/`↓`, `j`/`k`, `PgUp`/`PgDn`, `g`/`G` | move selection within the focused panel |
 | `Enter` | open detail for the selected item (PR description, commit diff, or notification summary) |
 | `o` | open the selected row (or current detail screen) in your browser |

@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Account switcher modal** on the Dashboard. Press `s` to open a centered modal listing every `gh auth` account; the currently-active account is marked with a green dot. Select with `↑/↓` (or `j/k`) and press `Enter` to run `gh auth switch -u <login>` and reload all data with the new credentials. `Esc` cancels.
+
 ## [0.2.0] — 2026-05-23
 
 ### Added
